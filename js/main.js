@@ -13,6 +13,7 @@
   const logListEl = document.getElementById('logList');
   const turnBadge = document.getElementById('turnBadge');
   const mapHint = document.getElementById('mapHint');
+  const eventBannerStack = document.getElementById('eventBannerStack');
   const endOverlay = document.getElementById('endOverlay');
   const endTitle = document.getElementById('endTitle');
   const endSummary = document.getElementById('endSummary');
@@ -282,7 +283,7 @@
     sim = new Simulation(config);
     lastGeneratedSeed = sim.seed;
     seedInput.value = String(sim.seed);
-    sim.onLog = (entry) => appendLogEntry(entry);
+    sim.onLog = (entry) => { appendLogEntry(entry); maybeShowEventBanner(entry); };
     sim.onEnd = () => showEndOverlay();
     if (!renderer) {
       renderer = new Renderer(mapCanvas, sim);
@@ -292,6 +293,7 @@
     }
     if (!chart) chart = new ChartRenderer(chartCanvas);
     logListEl.innerHTML = '';
+    if (eventBannerStack) eventBannerStack.innerHTML = '';
     // placeNations() logs founding events during construction, before onLog
     // was wired up above, so replay whatever is already in the log.
     for (const entry of sim.eventLog) appendLogEntry(entry);
@@ -372,11 +374,33 @@
 
   function appendLogEntry(entry) {
     const div = document.createElement('div');
-    div.className = 'log-entry';
+    div.className = `log-entry kind-${entry.kind || 'info'}`;
     div.innerHTML = `<span class="t">${entry.turn}年</span>${escapeHtml(entry.text)}`;
     logListEl.appendChild(div);
     while (logListEl.children.length > 250) logListEl.removeChild(logListEl.firstChild);
     logListEl.scrollTop = logListEl.scrollHeight;
+  }
+
+  // A small subset of "notable" log kinds also get a transient banner over
+  // the map, so major turning points (a war, a nation's fall, a golden age)
+  // register as an event rather than scrolling past unnoticed in the feed.
+  const BANNER_TAGS = {
+    war: '宣戦布告', death: '滅亡', found: '建国', goldenage: '黄金時代',
+    disaster: '天災', crisis: '内乱', rebellion: '反乱', raid: '異民族侵入',
+    hero: '英雄の出現', exploration: '新天地', end: '終幕',
+  };
+  function maybeShowEventBanner(entry) {
+    const tag = BANNER_TAGS[entry.kind];
+    if (!tag || !eventBannerStack) return;
+    while (eventBannerStack.children.length >= 4) eventBannerStack.removeChild(eventBannerStack.firstChild);
+    const div = document.createElement('div');
+    div.className = `event-banner kind-${entry.kind}`;
+    div.innerHTML = `<span class="eb-tag">${tag}</span><span class="eb-text">${escapeHtml(entry.text)}</span>`;
+    eventBannerStack.appendChild(div);
+    setTimeout(() => {
+      div.classList.add('leaving');
+      setTimeout(() => div.remove(), 450);
+    }, 4200);
   }
 
   function escapeHtml(s) {

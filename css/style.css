@@ -156,6 +156,84 @@ input[type="range"] {
   letter-spacing: 0.03em;
 }
 
+.event-banner-stack {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: center;
+  pointer-events: none;
+  z-index: 5;
+  width: min(560px, 82%);
+}
+.event-banner {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 7px 16px;
+  border-radius: 5px;
+  background: rgba(36,26,16,0.88);
+  border-left: 4px solid var(--accent-gold-bright);
+  color: #f5e9c8;
+  font-family: var(--font-display);
+  font-size: 12.5px;
+  letter-spacing: 0.02em;
+  box-shadow: 0 3px 10px rgba(0,0,0,0.35);
+  animation: bannerIn 0.35s ease-out;
+  max-width: 100%;
+}
+.event-banner.leaving { animation: bannerOut 0.4s ease-in forwards; }
+.event-banner .eb-tag {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  color: #241a08;
+  background: var(--accent-gold-bright);
+  padding: 1px 6px;
+  border-radius: 3px;
+  letter-spacing: 0.05em;
+}
+.event-banner .eb-text {
+  font-family: var(--font-body);
+  font-size: 13px;
+  color: #f5e9c8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.event-banner.kind-war { border-left-color: #d9694a; }
+.event-banner.kind-war .eb-tag { background: #d9694a; color: #2a0f08; }
+.event-banner.kind-death { border-left-color: #7a2e1d; }
+.event-banner.kind-death .eb-tag { background: #a8432c; color: #fbe9e2; }
+.event-banner.kind-found { border-left-color: #6fa267; }
+.event-banner.kind-found .eb-tag { background: #6fa267; color: #16240f; }
+.event-banner.kind-goldenage { border-left-color: #e0bb4a; }
+.event-banner.kind-goldenage .eb-tag { background: #e0bb4a; color: #2a1e05; }
+.event-banner.kind-disaster { border-left-color: #8a5a2f; }
+.event-banner.kind-disaster .eb-tag { background: #8a5a2f; color: #f5e9c8; }
+.event-banner.kind-crisis { border-left-color: #b56a3a; }
+.event-banner.kind-crisis .eb-tag { background: #b56a3a; color: #2a1405; }
+.event-banner.kind-rebellion { border-left-color: #c96a52; }
+.event-banner.kind-rebellion .eb-tag { background: #c96a52; color: #2a0f08; }
+.event-banner.kind-hero { border-left-color: var(--accent-gold-bright); }
+.event-banner.kind-alliance { border-left-color: #6fa267; }
+.event-banner.kind-alliance .eb-tag { background: #6fa267; color: #16240f; }
+.event-banner.kind-exploration { border-left-color: #5a8a8f; }
+.event-banner.kind-exploration .eb-tag { background: #5a8a8f; color: #0c1f21; }
+.event-banner.kind-end { border-left-color: var(--accent-gold-bright); background: rgba(36,26,16,0.95); }
+
+@keyframes bannerIn {
+  from { opacity: 0; transform: translateY(-10px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes bannerOut {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(-8px) scale(0.97); }
+}
+
 .sidebar {
   width: 300px;
   flex-shrink: 0;
@@ -227,11 +305,26 @@ input[type="range"] {
   flex-direction: column;
 }
 .log-entry {
-  padding: 3px 0;
+  padding: 3px 0 3px 8px;
   border-bottom: 1px dashed var(--parchment-dark);
+  border-left: 3px solid transparent;
   color: var(--ink-soft);
+  animation: logIn 0.3s ease-out;
 }
 .log-entry .t { color: var(--accent-gold); font-weight: 700; margin-right: 6px; font-variant-numeric: tabular-nums; }
+.log-entry.kind-war, .log-entry.kind-death { border-left-color: #a8432c; color: var(--accent-red); }
+.log-entry.kind-found { border-left-color: #6fa267; }
+.log-entry.kind-goldenage, .log-entry.kind-hero { border-left-color: var(--accent-gold-bright); font-weight: 600; }
+.log-entry.kind-disaster, .log-entry.kind-crisis, .log-entry.kind-rebellion, .log-entry.kind-raid { border-left-color: #b56a3a; }
+.log-entry.kind-alliance, .log-entry.kind-peace, .log-entry.kind-governance { border-left-color: var(--accent-green); }
+.log-entry.kind-exploration, .log-entry.kind-trade, .log-entry.kind-succession { border-left-color: #5a8a8f; }
+.log-entry.kind-chronicle { border-left-color: var(--accent-gold); font-style: italic; color: var(--ink-faint); }
+.log-entry.kind-end { border-left-color: var(--accent-gold-bright); font-weight: 700; color: var(--ink); }
+
+@keyframes logIn {
+  from { opacity: 0; transform: translateX(-4px); }
+  to { opacity: 1; transform: translateX(0); }
+}
 
 .overlay {
   position: fixed;

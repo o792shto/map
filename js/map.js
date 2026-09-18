@@ -40,6 +40,7 @@ class WorldMap {
     this.unrest = new Float32Array(n);
     this.ownerSinceTick = new Int32Array(n);
     this.coastal = null; // Uint8Array, computed lazily
+    this.landmassId = null; // Int32Array, computed lazily: connected land component per cell (-1 = ocean)
     // Generation knobs, tunable from the map settings panel.
     this.seaLevel = options.seaLevel != null ? options.seaLevel : 0.35;
     this.mountainThreshold = options.mountainThreshold != null ? options.mountainThreshold : 0.72;
@@ -207,5 +208,40 @@ class WorldMap {
   isCoastal(idx) {
     if (!this.coastal) this.computeCoastal();
     return this.coastal[idx] === 1;
+  }
+
+  // Lazily computed: flood-fills (4-connectivity) every land cell into a
+  // numbered landmass. Two cells share a landmassId only if there's a
+  // continuous land path between them — used to tell a real overseas island
+  // apart from a spot on the same continent that's merely reachable by a
+  // short hop across a bay.
+  computeLandmass() {
+    const { width, height } = this;
+    const ids = new Int32Array(width * height).fill(-1);
+    let nextId = 0;
+    for (let start = 0; start < ids.length; start++) {
+      if (ids[start] !== -1 || !BIOME_INFO[this.biome[start]].passable) continue;
+      const id = nextId++;
+      const queue = [start];
+      ids[start] = id;
+      let qi = 0;
+      while (qi < queue.length) {
+        const cur = queue[qi++];
+        const cx = cur % width, cy = Math.floor(cur / width);
+        for (const [nx, ny] of this.neighbors4(cx, cy)) {
+          const ni = this.idx(nx, ny);
+          if (ids[ni] !== -1 || !BIOME_INFO[this.biome[ni]].passable) continue;
+          ids[ni] = id;
+          queue.push(ni);
+        }
+      }
+    }
+    this.landmassId = ids;
+    return ids;
+  }
+
+  getLandmassId(idx) {
+    if (!this.landmassId) this.computeLandmass();
+    return this.landmassId[idx];
   }
 }

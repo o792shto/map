@@ -142,12 +142,14 @@ class Simulation {
       this.nationsById[i] = nation;
       if (established) this.seedInitialTerritory(nation, initialSize);
       const biomeName = BIOME_INFO[map.biome[idx]].name;
-      this.log(`${name}（${POLITICAL_SYSTEM_INFO[politicalSystem].label}・${LIFESTYLE_INFO[lifestyle].label}）が${biomeName}の地に建国された。指導者は${leaderName}（${PERSONALITY_INFO[personality].label}、${trait.label}）。`);
+      this.log(`${name}（${POLITICAL_SYSTEM_INFO[politicalSystem].label}・${LIFESTYLE_INFO[lifestyle].label}）が${biomeName}の地に建国された。指導者は${leaderName}（${PERSONALITY_INFO[personality].label}、${trait.label}）。`, 'found');
     });
   }
 
-  log(text) {
-    const entry = { turn: this.turn, text };
+  // `kind` categorizes the entry for the UI (log color-coding, and a toast
+  // banner for the subset of kinds worth interrupting the player for).
+  log(text, kind = 'info') {
+    const entry = { turn: this.turn, text, kind };
     this.eventLog.push(entry);
     if (this.eventLog.length > 500) this.eventLog.shift();
     if (this.onLog) this.onLog(entry);
@@ -268,23 +270,105 @@ class Simulation {
     return null;
   }
 
+  // Per-(nation, candidate-cell) claim probability, isolated from the
+  // resolution logic below so it can be reused for both uncontested cells
+  // (one bidder) and contested no-man's-land cells (two+ nations bidding on
+  // the same empty cell at once).
+  expansionBidProb(nation, ctx, cellIdx) {
+    const map = this.map;
+    const cost = BIOME_INFO[map.biome[cellIdx]].cost;
+    let prob = clamp(0.5 * ctx.power * nation.mods.expansionMul / cost, 0, 0.9);
+    if (ctx.directed) {
+      prob = clamp(prob * 1.6, 0, 0.95); // player-directed expansion pushes harder
+    } else if (ctx.focus) {
+      // Cells that bring us closer to the rival than our capital already is
+      // get pushed harder; cells that grow away from the front are held
+      // back, so territory visibly leans toward the conflict.
+      const cx = cellIdx % map.width, cy = Math.floor(cellIdx / map.width);
+      const cellToFocus = Math.hypot(cx - ctx.fx, cy - ctx.fy);
+      prob = cellToFocus < ctx.capToFocus
+        ? clamp(prob * ctx.focus.strength, 0, 0.95)
+        : clamp(prob * (2 - ctx.focus.strength), 0, 0.9);
+    }
+    return prob;
+  }
+
+  // Growing territory used to let every bordering nation roll independently
+  // for the very same empty cell, so a contested strip between two expanding
+  // nations resolved as an interlaced, checkerboard-like mess instead of a
+  // clean front line. Cells with only one bidder still resolve with a plain
+  // probability roll as before; cells two or more nations are reaching for
+  // are resolved once, with a single weighted winner, so a front settles
+  // along a coherent line instead of flickering cell-by-cell.
   processExpansion(aliveNations, expansionCandidates) {
     const map = this.map;
     for (const nation of aliveNations) {
       if (nation.directiveTarget && this.turn > nation.directiveTarget.expiresAtTurn) {
         nation.directiveTarget = null;
       }
-      const candidates = expansionCandidates.get(nation.id);
-      if (!candidates || candidates.size === 0) continue;
-      const mods = nation.mods;
-      const power = (nation.population * 0.4 + nation.economy * 0.6) / 120;
+    }
+
+    const cellBidders = new Map(); // cellIdx -> [nationId, ...]
+    for (const [nationId, candSet] of expansionCandidates) {
+      for (const cellIdx of candSet) {
+        if (!cellBidders.has(cellIdx)) cellBidders.set(cellIdx, []);
+        cellBidders.get(cellIdx).push(nationId);
+      }
+    }
+
+    const nationCtx = new Map();
+    for (const nation of aliveNations) {
+      if (!expansionCandidates.has(nation.id)) continue;
       const directed = nation.directiveTarget;
       const focus = directed ? null : this.computeFocusPoint(nation);
-      const maxClaims = directed ? 5 : 3;
-      let claims = 0;
-      let candArr = [...candidates];
-      if (directed) {
-        const tx = directed.idx % map.width, ty = Math.floor(directed.idx / map.width);
+      const capX = nation.capitalIdx % map.width, capY = Math.floor(nation.capitalIdx / map.width);
+      const fx = focus ? focus.idx % map.width : 0, fy = focus ? Math.floor(focus.idx / map.width) : 0;
+      nationCtx.set(nation.id, {
+        power: (nation.population * 0.4 + nation.economy * 0.6) / 120,
+        directed, focus, fx, fy,
+        capToFocus: focus ? Math.hypot(capX - fx, capY - fy) : 0,
+        claims: 0,
+        maxClaims: directed ? 5 : 3,
+      });
+    }
+
+    // Contested cells first, resolved one at a time in random order.
+    const contestedCells = this.rng.shuffle(
+      [...cellBidders.entries()].filter(([, ids]) => ids.length > 1).map(([idx]) => idx)
+    );
+    for (const cellIdx of contestedCells) {
+      const bids = [];
+      for (const nationId of cellBidders.get(cellIdx)) {
+        const ctx = nationCtx.get(nationId);
+        if (!ctx || ctx.claims >= ctx.maxClaims) continue;
+        const nation = this.nationsById[nationId];
+        const prob = this.expansionBidProb(nation, ctx, cellIdx);
+        if (prob > 0) bids.push({ nation, ctx, prob });
+      }
+      if (bids.length === 0) continue;
+      const pAny = 1 - bids.reduce((acc, b) => acc * (1 - b.prob), 1);
+      if (!this.rng.chance(pAny)) continue;
+      const totalWeight = bids.reduce((s, b) => s + b.prob, 0);
+      let r = this.rng.float(0, totalWeight);
+      let winner = bids[bids.length - 1];
+      for (const b of bids) {
+        r -= b.prob;
+        if (r <= 0) { winner = b; break; }
+      }
+      this.claimCell(cellIdx, winner.nation, false);
+      winner.ctx.claims++;
+    }
+
+    // Uncontested cells: same plain roll as before, per nation, with the
+    // player-directed target (nearest-first) or war-focus shuffle preserved.
+    for (const nation of aliveNations) {
+      const ctx = nationCtx.get(nation.id);
+      if (!ctx || ctx.claims >= ctx.maxClaims) continue;
+      const candidates = expansionCandidates.get(nation.id);
+      let candArr = [...candidates].filter((idx) => cellBidders.get(idx).length === 1);
+      if (candArr.length === 0) continue;
+      if (ctx.directed) {
+        const tx = ctx.directed.idx % map.width, ty = Math.floor(ctx.directed.idx / map.width);
         candArr.sort((c1, c2) => {
           const x1 = c1 % map.width, y1 = Math.floor(c1 / map.width);
           const x2 = c2 % map.width, y2 = Math.floor(c2 / map.width);
@@ -293,29 +377,12 @@ class Simulation {
       } else {
         candArr = this.rng.shuffle(candArr);
       }
-      const capX = nation.capitalIdx % map.width, capY = Math.floor(nation.capitalIdx / map.width);
-      const fx = focus ? focus.idx % map.width : 0, fy = focus ? Math.floor(focus.idx / map.width) : 0;
-      const capToFocus = focus ? Math.hypot(capX - fx, capY - fy) : 0;
       for (const cellIdx of candArr) {
-        if (claims >= maxClaims) break;
-        const biome = map.biome[cellIdx];
-        const cost = BIOME_INFO[biome].cost;
-        let prob = clamp(0.5 * power * mods.expansionMul / cost, 0, 0.9);
-        if (directed) {
-          prob = clamp(prob * 1.6, 0, 0.95); // player-directed expansion pushes harder
-        } else if (focus) {
-          // Cells that bring us closer to the rival than our capital already
-          // is get pushed harder; cells that grow away from the front are
-          // held back, so territory visibly leans toward the conflict.
-          const cx = cellIdx % map.width, cy = Math.floor(cellIdx / map.width);
-          const cellToFocus = Math.hypot(cx - fx, cy - fy);
-          prob = cellToFocus < capToFocus
-            ? clamp(prob * focus.strength, 0, 0.95)
-            : clamp(prob * (2 - focus.strength), 0, 0.9);
-        }
+        if (ctx.claims >= ctx.maxClaims) break;
+        const prob = this.expansionBidProb(nation, ctx, cellIdx);
         if (this.rng.chance(prob)) {
           this.claimCell(cellIdx, nation, false);
-          claims++;
+          ctx.claims++;
         }
       }
     }
@@ -323,9 +390,14 @@ class Simulation {
 
   // BFS across contiguous ocean from a coastal cell; returns land-cell indices
   // reachable within `range` sea hops (the first landfall in each direction,
-  // i.e. a beachhead) regardless of who owns them.
+  // i.e. a beachhead) regardless of who owns them. Only cells on a *different*
+  // landmass than the origin are returned: a naval crossing represents
+  // reaching a real overseas island/continent, not hopping a few cells across
+  // a bay to an unclaimed pocket on the nation's own mainland (which used to
+  // spawn odd, unearned exclaves with no land route back to the capital).
   navalTargetsFrom(originIdx, range) {
     const map = this.map;
+    const homeLandmass = map.getLandmassId(originIdx);
     const visited = new Set([originIdx]);
     let frontier = [originIdx];
     const landTargets = new Set();
@@ -339,7 +411,7 @@ class Simulation {
           visited.add(ni);
           if (map.biome[ni] === BIOME.OCEAN) {
             next.push(ni);
-          } else {
+          } else if (map.getLandmassId(ni) !== homeLandmass) {
             landTargets.add(ni);
           }
         }
@@ -398,18 +470,18 @@ class Simulation {
                 other.alive = false;
                 other.diedAtTick = this.turn;
                 nation.relations.delete(other.id);
-                this.log(`${nation.name}が海上遠征の末、${other.name}を滅ぼした！`);
+                this.log(`${nation.name}が海上遠征の末、${other.name}を滅ぼした！`, 'death');
               }
             }
           }
         }
       }
       if (colonized > 0) {
-        this.log(`${nation.name}が海を渡り、${colonized}箇所の新天地に入植した。`);
+        this.log(`${nation.name}が海を渡り、${colonized}箇所の新天地に入植した。`, 'naval');
       }
       for (const [otherId, count] of invadedTargets) {
         const other = this.nationsById[otherId];
-        if (other) this.log(`${nation.name}が海を越えて${other.name}領に上陸侵攻し、${count}地域を占領した。`);
+        if (other) this.log(`${nation.name}が海を越えて${other.name}領に上陸侵攻し、${count}地域を占領した。`, 'naval');
       }
     }
   }
@@ -421,7 +493,7 @@ class Simulation {
     defender.warSinceTick.set(attacker.id, this.turn);
     attacker.adjustRelation(defender.id, -40);
     defender.adjustRelation(attacker.id, -40);
-    this.log(`${attacker.name}（${attacker.leaderName}）が${defender.name}に宣戦布告した。理由: ${reason}`);
+    this.log(`${attacker.name}（${attacker.leaderName}）が${defender.name}に宣戦布告した。理由: ${reason}`, 'war');
     attacker.recordEvent(this.turn, `${defender.name}に宣戦布告（${reason}）`);
     defender.recordEvent(this.turn, `${attacker.name}より宣戦布告を受けた（${reason}）`);
   }
@@ -523,14 +595,14 @@ class Simulation {
     loser.adjustRelation(winner.id, -3);
 
     if (captured.length > 0) {
-      this.log(`${winner.name}が${loser.name}と交戦し、${captured.length}地域を奪取した。`);
+      this.log(`${winner.name}が${loser.name}と交戦し、${captured.length}地域を奪取した。`, 'battle');
     }
 
     if (loser.territorySize === 0 && loser.alive) {
       loser.alive = false;
       loser.diedAtTick = this.turn;
       winner.relations.delete(loser.id);
-      this.log(`${winner.name}が${loser.name}を滅ぼした！`);
+      this.log(`${winner.name}が${loser.name}を滅ぼした！`, 'death');
       winner.recordEvent(this.turn, `${loser.name}を滅ぼし版図に加えた`);
     }
   }
@@ -565,12 +637,36 @@ class Simulation {
           other.warSinceTick.delete(nation.id);
           nation.adjustRelation(otherId, 15);
           other.adjustRelation(nation.id, 15);
-          this.log(`${nation.name}と${other.name}が休戦協定を結んだ。`);
+          this.log(`${nation.name}と${other.name}が休戦協定を結んだ。`, 'peace');
           nation.recordEvent(this.turn, `${other.name}と休戦`);
           other.recordEvent(this.turn, `${nation.name}と休戦`);
         }
       }
     }
+  }
+
+  // Flavor text for a succession/legitimacy crisis, tuned to how the nation
+  // is actually governed so the same mechanical hit (military & economy
+  // dip, a flare of unrest) reads as a different kind of history each time.
+  successionFlavor(nation) {
+    switch (nation.politicalSystem) {
+      case POLITICAL_SYSTEM.MONARCHY: return '王位継承を巡る争いが勃発し';
+      case POLITICAL_SYSTEM.TRIBAL: return '有力部族間の内紛が激化し';
+      case POLITICAL_SYSTEM.THEOCRACY: return '教義解釈を巡る宗派対立が起こり';
+      case POLITICAL_SYSTEM.REPUBLIC: return '深刻な政争と汚職疑惑が広がり';
+      case POLITICAL_SYSTEM.FEDERATION: return '構成諸州の足並みが乱れ';
+      default: return '国内の混乱が広がり';
+    }
+  }
+
+  // Flavor for a natural disaster, picked from the capital's terrain so the
+  // hazard fits the land (mountains quake, forests/plains burn, coasts flood).
+  disasterFlavor(nation) {
+    const biome = this.map.biome[nation.capitalIdx];
+    if (biome === BIOME.MOUNTAIN) return '大地震';
+    if (biome === BIOME.DESERT) return '大干ばつ';
+    if (this.map.isCoastal(nation.capitalIdx)) return '大洪水';
+    return '大火災';
   }
 
   processEvents(aliveNations) {
@@ -580,16 +676,111 @@ class Simulation {
 
       if (this.rng.chance(0.0025)) {
         nation.population = Math.max(1, nation.population * 0.65);
-        this.log(`${nation.name}で疫病が流行し、人口が激減した。`);
+        this.log(`${nation.name}で疫病が流行し、人口が激減した。`, 'plague');
         nation.recordEvent(this.turn, '疫病が流行');
         continue;
       }
 
       if (nation.foodTotal != null && nation.foodTotal < nation.population * 0.035 && this.rng.chance(0.02)) {
         nation.population = Math.max(1, nation.population * 0.78);
-        this.log(`${nation.name}で飢饉が発生し、人口が減少した。`);
+        this.log(`${nation.name}で飢饉が発生し、人口が減少した。`, 'famine');
         nation.recordEvent(this.turn, '飢饉が発生');
         continue;
+      }
+
+      // A prosperous era: population and economy surge together, the polar
+      // opposite of plague/famine, so good times are visible as often as bad.
+      if (this.rng.chance(0.0018)) {
+        nation.population = Math.min(nation.population * 1.25, nation.population + 40);
+        nation.economy *= 1.2;
+        this.log(`${nation.name}に黄金時代が到来し、国力が大いに栄えた。`, 'goldenage');
+        nation.recordEvent(this.turn, '黄金時代の到来');
+        continue;
+      }
+
+      // A legitimacy crisis: military and economy dip, and a handful of
+      // territories flare up in unrest, flavored to match how the nation
+      // is actually governed.
+      if (this.rng.chance(0.0016)) {
+        nation.military *= 0.75;
+        nation.economy *= 0.9;
+        const territoryArr = [...nation.territory];
+        for (const idx of this.rng.shuffle(territoryArr).slice(0, 8)) {
+          this.map.unrest[idx] = clamp(this.map.unrest[idx] + 20, 0, 100);
+        }
+        this.log(`${nation.name}で${this.successionFlavor(nation)}、国内が動揺した。`, 'crisis');
+        nation.recordEvent(this.turn, '国内の継承・政争危機');
+        continue;
+      }
+
+      // Natural disaster: a one-off economic/military shock flavored by the
+      // capital's terrain, independent of war or internal politics.
+      if (this.rng.chance(0.0016)) {
+        const kind = this.disasterFlavor(nation);
+        nation.economy *= 0.82;
+        nation.military = Math.max(0, nation.military - nation.military * 0.12);
+        this.log(`${nation.name}を${kind}が襲い、国土に大きな被害をもたらした。`, 'disaster');
+        nation.recordEvent(this.turn, `${kind}による被害`);
+        continue;
+      }
+
+      // Barbarian/raider incursion along the frontier: more common for
+      // tribal and nomadic peoples living on the edges of settled land.
+      const frontierRisk = (nation.politicalSystem === POLITICAL_SYSTEM.TRIBAL ? 2.2 : 1)
+        * (nation.lifestyle === LIFESTYLE.NOMADIC ? 1.6 : 1);
+      if (this.rng.chance(0.0011 * frontierRisk)) {
+        nation.military = Math.max(0, nation.military - nation.military * 0.15);
+        this.log(`${nation.name}の国境地帯に異民族の侵入があり、防衛線が乱れた。`, 'raid');
+        nation.recordEvent(this.turn, '異民族の侵入');
+        continue;
+      }
+
+      // Peaceful hand-off of leadership: no mechanical penalty, mostly a
+      // narrative beat that keeps a centuries-long run from having a single
+      // immortal ruler the whole way through.
+      if (this.rng.chance(0.0013)) {
+        const newLeader = generateLeaderName(this.rng, nation.personality);
+        const oldLeader = nation.leaderName;
+        nation.leaderName = newLeader;
+        this.log(`${nation.name}で指導者${oldLeader}の代替わりがあり、${newLeader}が新たに即位した。`, 'succession');
+        nation.recordEvent(this.turn, `${newLeader}が新指導者に即位`);
+      }
+
+      // Age-of-exploration flavor for seafaring peoples: an expedition finds
+      // and settles new coastland outright, on top of the regular slow
+      // naval colonization roll.
+      if ((nation.lifestyle === LIFESTYLE.MARITIME || nation.lifestyle === LIFESTYLE.FISHING) && this.rng.chance(0.0015)) {
+        const coastalCells = [...nation.territory].filter((idx) => this.map.isCoastal(idx));
+        if (coastalCells.length) {
+          const origin = this.rng.choice(coastalCells);
+          const targets = this.navalTargetsFrom(origin, NAVAL_RANGE).filter((idx) => this.map.owner[idx] === -1);
+          if (targets.length) {
+            const claimed = this.rng.choice(targets);
+            this.claimCell(claimed, nation, false);
+            this.log(`${nation.name}の船団が新たな海岸を発見し、入植地を築いた。`, 'exploration');
+            nation.recordEvent(this.turn, '新天地の発見と入植');
+          }
+        }
+      }
+
+      // Good governance: an active, deliberate calming of unrest, the
+      // counterweight to the slow creep modeled in processUnrest.
+      if (this.rng.chance(0.0018)) {
+        for (const idx of nation.territory) {
+          this.map.unrest[idx] = Math.max(0, this.map.unrest[idx] - 30);
+        }
+        this.log(`${nation.name}で善政が敷かれ、各地の民心が落ち着きを取り戻した。`, 'governance');
+        nation.recordEvent(this.turn, '善政による民心安定');
+      }
+
+      // Trade boom: a one-off economic windfall, more likely for merchant-
+      // minded or seafaring nations with routes to profit from.
+      const tradeAffinity = (nation.personality === PERSONALITY.MERCHANT ? 1.8 : 1)
+        * (nation.trait && nation.trait.id === 'trade' ? 1.5 : 1);
+      if (this.rng.chance(0.0018 * tradeAffinity)) {
+        nation.economy *= 1.18;
+        this.log(`${nation.name}で交易が空前の活況を呈し、国庫が潤った。`, 'trade');
+        nation.recordEvent(this.turn, '交易ブーム');
       }
 
       if (this.rng.chance(0.003 * mods.allianceMul)) {
@@ -604,7 +795,7 @@ class Simulation {
           other.allies.add(nation.id);
           nation.adjustRelation(otherId, 25);
           other.adjustRelation(nation.id, 25);
-          this.log(`${nation.name}と${other.name}が同盟を締結した。`);
+          this.log(`${nation.name}と${other.name}が同盟を締結した。`, 'alliance');
           nation.recordEvent(this.turn, `${other.name}と同盟`);
           other.recordEvent(this.turn, `${nation.name}と同盟`);
         }
@@ -612,7 +803,7 @@ class Simulation {
 
       if (this.rng.chance(0.002)) {
         nation.heroBoostTicks = 200;
-        this.log(`${nation.name}に英雄が現れ、軍を鼓舞した！`);
+        this.log(`${nation.name}に英雄が現れ、軍を鼓舞した！`, 'hero');
         nation.recordEvent(this.turn, '英雄の出現');
       }
     }
@@ -667,13 +858,13 @@ class Simulation {
         map.unrest[idx] = 0;
       }
       if (toRebel.length > 0) {
-        this.log(`${nation.name}の統治下で反乱が発生し、${toRebel.length}地域が独立した。`);
+        this.log(`${nation.name}の統治下で反乱が発生し、${toRebel.length}地域が独立した。`, 'rebellion');
         nation.recordEvent(this.turn, `反乱で${toRebel.length}地域を喪失`);
       }
       if (nation.territorySize === 0 && nation.alive) {
         nation.alive = false;
         nation.diedAtTick = this.turn;
-        this.log(`${nation.name}が内部崩壊により消滅した。`);
+        this.log(`${nation.name}が内部崩壊により消滅した。`, 'death');
       }
     }
   }
@@ -712,7 +903,7 @@ class Simulation {
     const top = alive.slice(0, 3)
       .map(n => `${n.name}(${((n.territorySize / landTotal) * 100).toFixed(0)}%)`)
       .join('、');
-    this.log(`【年代記 ${this.turn}年】情勢: ${top}。生存国家数: ${alive.length}。`);
+    this.log(`【年代記 ${this.turn}年】情勢: ${top}。生存国家数: ${alive.length}。`, 'chronicle');
   }
 
   checkEnd() {
@@ -721,14 +912,14 @@ class Simulation {
     if (this.nations.length > 1 && alive.length <= 1) {
       this.ended = true;
       this.winner = alive[0] || null;
-      this.log(alive[0] ? `${alive[0].name}が唯一残った国家として勝利した！` : '全ての国家が滅亡した。');
+      this.log(alive[0] ? `${alive[0].name}が唯一残った国家として勝利した！` : '全ての国家が滅亡した。', 'end');
       if (this.onEnd) this.onEnd();
       return;
     }
     if (!this.config.endless && this.turn >= this.config.maxTurns) {
       this.ended = true;
       this.winner = alive.slice().sort((x, y) => y.territorySize - x.territorySize)[0] || null;
-      this.log('既定の年数に到達し、シミュレーションを終了した。');
+      this.log('既定の年数に到達し、シミュレーションを終了した。', 'end');
       if (this.onEnd) this.onEnd();
     }
   }
@@ -744,7 +935,7 @@ class Simulation {
     if (!nation || !nation.alive || cellIdx == null) return false;
     if (!this.map.isLand(cellIdx % this.map.width, Math.floor(cellIdx / this.map.width))) return false;
     nation.directiveTarget = { idx: cellIdx, expiresAtTurn: this.turn + 200 };
-    this.log(`${nation.name}の指導者${nation.leaderName}が新たな拡張方針を示した。`);
+    this.log(`${nation.name}の指導者${nation.leaderName}が新たな拡張方針を示した。`, 'directive');
     nation.recordEvent(this.turn, '拡張方針を指示');
     return true;
   }
@@ -770,11 +961,11 @@ class Simulation {
       target.allies.add(nationId);
       nation.adjustRelation(targetId, 25);
       target.adjustRelation(nationId, 25);
-      this.log(`${nation.name}の提案により、${nation.name}と${target.name}が同盟を締結した。`);
+      this.log(`${nation.name}の提案により、${nation.name}と${target.name}が同盟を締結した。`, 'alliance');
       nation.recordEvent(this.turn, `${target.name}と同盟（指導者提案）`);
       target.recordEvent(this.turn, `${nation.name}と同盟（指導者提案）`);
     } else {
-      this.log(`${nation.name}の同盟提案は${target.name}に拒否された。`);
+      this.log(`${nation.name}の同盟提案は${target.name}に拒否された。`, 'directive');
       nation.adjustRelation(targetId, -3);
       target.adjustRelation(nationId, -3);
     }
@@ -793,11 +984,11 @@ class Simulation {
       target.warSinceTick.delete(nationId);
       nation.adjustRelation(targetId, 15);
       target.adjustRelation(nationId, 15);
-      this.log(`${nation.name}の提案により、${nation.name}と${target.name}が休戦協定を結んだ。`);
+      this.log(`${nation.name}の提案により、${nation.name}と${target.name}が休戦協定を結んだ。`, 'peace');
       nation.recordEvent(this.turn, `${target.name}と休戦（指導者提案）`);
       target.recordEvent(this.turn, `${nation.name}と休戦（指導者提案）`);
     } else {
-      this.log(`${nation.name}の休戦提案は${target.name}に拒否された。`);
+      this.log(`${nation.name}の休戦提案は${target.name}に拒否された。`, 'directive');
     }
     return true;
   }
