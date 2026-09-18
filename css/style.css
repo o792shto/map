@@ -428,7 +428,7 @@ input[type="range"] {
 }
 
 .map-choice-row { display: flex; gap: 8px; margin-bottom: 8px; }
-.map-choice {
+.map-choice, .start-mode-choice {
   flex: 1;
   padding: 8px 6px;
   font-size: 12px;
@@ -440,15 +440,76 @@ input[type="range"] {
   color: var(--ink-soft);
   cursor: pointer;
 }
-.map-choice:hover { background: var(--parchment-mid); }
-.map-choice.active {
+.map-choice:hover, .start-mode-choice:hover { background: var(--parchment-mid); }
+.map-choice.active, .start-mode-choice.active {
   background: linear-gradient(180deg, var(--accent-gold-bright), var(--accent-gold));
   color: #241a08;
   border-color: #8a6516;
 }
-#randomMapOptions.hidden { display: none; }
+#randomMapOptions.hidden, #fromZeroOptions.hidden, #manualPlacementPanel.hidden { display: none; }
 
 .btn.large { width: 100%; padding: 12px; font-size: 15px; margin-top: 16px; }
+
+.fz-manual-toggle { margin: 8px 0; justify-content: flex-start; gap: 8px; }
+.fz-manual-toggle input { order: -1; }
+
+#placementPreview {
+  width: 100%;
+  height: 160px;
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  cursor: crosshair;
+  display: block;
+}
+.placement-slot-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 150px;
+  overflow-y: auto;
+  margin: 8px 0;
+}
+.placement-slot-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.placement-slot-row .slot-num {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--accent-gold);
+  color: #241a08;
+  font-weight: 700;
+  font-size: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.placement-slot-row input[type="text"] {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-body);
+  font-size: 12px;
+  padding: 3px 6px;
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  background: var(--parchment);
+  color: var(--ink);
+}
+.placement-slot-row .slot-status { font-size: 11px; color: var(--ink-faint); white-space: nowrap; width: 62px; }
+.placement-slot-row .slot-status.placed { color: var(--accent-green); }
+.placement-slot-row .slot-clear {
+  background: transparent;
+  border: none;
+  color: var(--ink-faint);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0 4px;
+}
+.placement-slot-row .slot-clear:hover { color: var(--accent-red); }
 
 @media (max-width: 820px) {
   .layout { flex-direction: column; height: auto; }

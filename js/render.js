@@ -1,11 +1,14 @@
-// Canvas rendering: a crisp, hand-tinted antique-atlas style map. Terrain and
-// territory colors are baked once per simulation tick into a 1px-per-cell
-// offscreen buffer (a monochrome ink terrain tone blended with a translucent
-// nation wash), drawn without smoothing so edges stay sharp. Smoothness in
-// national borders comes from thick, round-jointed ink stroke lines rather
-// than a blurred raster, so the map reads as sharply inked rather than soft-
-// focus. A paper-grain overlay and screen-space nation name labels complete
-// the look. Zoom & pan camera + click-to-select.
+// Canvas rendering: a crisp, hand-tinted antique-atlas style map. Terrain
+// colors are baked once per simulation tick into a 1px-per-cell offscreen
+// buffer and drawn without smoothing so terrain stays sharp. National
+// territory is drawn separately as smooth filled vector shapes: each
+// nation's true cell-ownership boundary is traced into closed loops
+// (a marching-squares-style contour extraction), simplified, and rounded
+// with Chaikin corner-cutting, so borders read as smooth coastlines/
+// frontiers rather than a staircase of pixels, while the fill exactly
+// matches true ownership (holes stay real holes, no raster artifacts). A
+// paper-grain overlay and screen-space nation name labels complete the
+// look. Zoom & pan camera + click-to-select.
 
 const BIOME_SHADE = {
   [BIOME.PLAINS]: 0,
@@ -16,6 +19,7 @@ const BIOME_SHADE = {
 };
 
 const TERRITORY_WASH_ALPHA = 0.5; // how strongly the nation tint covers the terrain beneath it
+const CHAIKIN_ITERATIONS = 2;
 
 function hexToRgb(hex) {
   const m = hex.replace('#', '');
@@ -52,6 +56,81 @@ function shadeNationColor(nation, biome) {
   return rgb;
 }
 
+// Rounds a closed polygon loop with Chaikin corner-cutting: replaces each
+// vertex with two points 1/4 and 3/4 of the way along its edges, pulling
+// the curve away from sharp pixel-step corners. Iterating a few times
+// converges to a smooth, rounded outline while keeping the true topology.
+function chaikinSmoothClosed(points, iterations) {
+  let pts = points;
+  for (let it = 0; it < iterations; it++) {
+    const n = pts.length;
+    if (n < 3) return pts;
+    const next = new Array(n * 2);
+    for (let i = 0; i < n; i++) {
+      const p0 = pts[i], p1 = pts[(i + 1) % n];
+      next[i * 2] = { x: p0.x * 0.75 + p1.x * 0.25, y: p0.y * 0.75 + p1.y * 0.25 };
+      next[i * 2 + 1] = { x: p0.x * 0.25 + p1.x * 0.75, y: p0.y * 0.25 + p1.y * 0.75 };
+    }
+    pts = next;
+  }
+  return pts;
+}
+
+// Drops vertices where the incoming and outgoing edge run in the same
+// direction (a straight run of unit steps), so Chaikin smoothing only acts
+// on real corners instead of re-processing hundreds of collinear points.
+function simplifyCollinear(loop) {
+  const n = loop.length;
+  if (n < 3) return loop;
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const prev = loop[(i - 1 + n) % n], cur = loop[i], next = loop[(i + 1) % n];
+    const dx1 = cur.x - prev.x, dy1 = cur.y - prev.y;
+    const dx2 = next.x - cur.x, dy2 = next.y - cur.y;
+    if (dx1 * dy2 - dy1 * dx2 !== 0) out.push(cur);
+  }
+  return out.length >= 3 ? out : loop;
+}
+
+// Chains directed unit boundary edges (each already oriented so the owning
+// nation's cell sits on a fixed side) into closed loops. A vertex normally
+// has exactly one unvisited outgoing edge; the rare diagonal-touch case
+// (two blobs meeting at a single corner) just picks the first candidate,
+// which is visually irrelevant once smoothed.
+function traceLoops(edges) {
+  const startIndex = new Map();
+  edges.forEach((e, i) => {
+    const k = e.x1 + ',' + e.y1;
+    let arr = startIndex.get(k);
+    if (!arr) { arr = []; startIndex.set(k, arr); }
+    arr.push(i);
+  });
+  const consumed = new Uint8Array(edges.length);
+  const loops = [];
+  for (let i = 0; i < edges.length; i++) {
+    if (consumed[i]) continue;
+    const loop = [];
+    const startX = edges[i].x1, startY = edges[i].y1;
+    let curIdx = i;
+    let guard = edges.length + 4;
+    while (guard-- > 0) {
+      const e = edges[curIdx];
+      consumed[curIdx] = 1;
+      loop.push({ x: e.x1, y: e.y1 });
+      if (e.x2 === startX && e.y2 === startY) break;
+      const candidates = startIndex.get(e.x2 + ',' + e.y2);
+      let nextIdx = -1;
+      if (candidates) {
+        for (const ci of candidates) { if (!consumed[ci]) { nextIdx = ci; break; } }
+      }
+      if (nextIdx === -1) break;
+      curIdx = nextIdx;
+    }
+    if (loop.length >= 3) loops.push(loop);
+  }
+  return loops;
+}
+
 class Renderer {
   constructor(canvas, sim) {
     this.canvas = canvas;
@@ -68,8 +147,7 @@ class Renderer {
     this._bufCanvas = null;
     this._bufCtx = null;
     this._bufDirtyTurn = -1;
-    this._generalBorderPath = null;
-    this._nationBorderPaths = new Map();
+    this._nationShapePaths = new Map(); // nationId -> Path2D (smoothed, filled + stroked)
     this._labelPositions = new Map(); // nationId -> {x, y} in cell-space
     this._grainPattern = this.buildGrainPattern();
     this.bindEvents();
@@ -225,8 +303,9 @@ class Renderer {
     return this.ctx.createPattern(c, 'repeat');
   }
 
-  // Rebuilds the terrain+territory pixel buffer, border paths and label
-  // anchor points. Cheap enough (one pass over the grid) to redo once per
+  // Rebuilds the terrain pixel buffer, the smoothed per-nation territory
+  // shapes and label anchor points. Cheap enough (one pass over the grid,
+  // plus boundary-length-proportional loop tracing) to redo once per
   // simulation tick.
   buildBuffer() {
     const map = this.sim.map;
@@ -240,26 +319,34 @@ class Renderer {
     const data = imgData.data;
     const sim = this.sim;
     const centroidSum = new Map(); // nationId -> {sx, sy, n}
+    const nationEdges = new Map(); // nationId -> [{x1,y1,x2,y2}, ...]
+    const pushEdge = (nationId, x1, y1, x2, y2) => {
+      let arr = nationEdges.get(nationId);
+      if (!arr) { arr = []; nationEdges.set(nationId, arr); }
+      arr.push({ x1, y1, x2, y2 });
+    };
 
     for (let y = 0; y < map.height; y++) {
       for (let x = 0; x < map.width; x++) {
         const i = map.idx(x, y);
         const owner = map.owner[i];
         const biome = map.biome[i];
-        const [br, bg, bb] = BIOME_RGB[biome];
-        let r = br, g = bg, b = bb;
+        let [r, g, b] = BIOME_RGB[biome];
+
         if (owner !== -1) {
-          const nation = sim.nationsById[owner];
-          if (nation) {
-            const [nr, ng, nb] = shadeNationColor(nation, biome);
-            r = br * (1 - TERRITORY_WASH_ALPHA) + nr * TERRITORY_WASH_ALPHA;
-            g = bg * (1 - TERRITORY_WASH_ALPHA) + ng * TERRITORY_WASH_ALPHA;
-            b = bb * (1 - TERRITORY_WASH_ALPHA) + nb * TERRITORY_WASH_ALPHA;
-            let sum = centroidSum.get(owner);
-            if (!sum) { sum = { sx: 0, sy: 0, n: 0 }; centroidSum.set(owner, sum); }
-            sum.sx += x; sum.sy += y; sum.n++;
-          }
+          let sum = centroidSum.get(owner);
+          if (!sum) { sum = { sx: 0, sy: 0, n: 0 }; centroidSum.set(owner, sum); }
+          sum.sx += x; sum.sy += y; sum.n++;
+
+          // Emit boundary edges in a fixed per-cell winding order; edges
+          // only appear where the neighbor differs, so shared internal
+          // edges between same-owner cells cancel out automatically.
+          if (y === 0 || map.owner[map.idx(x, y - 1)] !== owner) pushEdge(owner, x, y, x + 1, y);
+          if (x === map.width - 1 || map.owner[map.idx(x + 1, y)] !== owner) pushEdge(owner, x + 1, y, x + 1, y + 1);
+          if (y === map.height - 1 || map.owner[map.idx(x, y + 1)] !== owner) pushEdge(owner, x + 1, y + 1, x, y + 1);
+          if (x === 0 || map.owner[map.idx(x - 1, y)] !== owner) pushEdge(owner, x, y + 1, x, y);
         }
+
         if (this.showUnrest && owner !== -1) {
           const u = map.unrest[i];
           if (u > 40) {
@@ -281,48 +368,26 @@ class Renderer {
       this._labelPositions.set(nationId, { x: sum.sx / sum.n, y: sum.sy / sum.n, size: sum.n });
     }
 
-    this.buildBorders();
+    this.buildNationShapes(nationEdges);
   }
 
-  buildBorders() {
-    const map = this.sim.map;
+  buildNationShapes(nationEdges) {
     const cellPx = this.cellPx;
-    const general = new Path2D();
-    const perNation = new Map();
-    const addSeg = (path, x0, y0, x1, y1) => {
-      path.moveTo(x0 * cellPx, y0 * cellPx);
-      path.lineTo(x1 * cellPx, y1 * cellPx);
-    };
-    const nationPath = (id) => {
-      if (!perNation.has(id)) perNation.set(id, new Path2D());
-      return perNation.get(id);
-    };
-    for (let y = 0; y < map.height; y++) {
-      for (let x = 0; x < map.width; x++) {
-        const i = map.idx(x, y);
-        const owner = map.owner[i];
-        if (x < map.width - 1) {
-          const j = map.idx(x + 1, y);
-          const oOwner = map.owner[j];
-          if (oOwner !== owner) {
-            addSeg(general, x + 1, y, x + 1, y + 1);
-            if (owner !== -1) addSeg(nationPath(owner), x + 1, y, x + 1, y + 1);
-            if (oOwner !== -1) addSeg(nationPath(oOwner), x + 1, y, x + 1, y + 1);
-          }
-        }
-        if (y < map.height - 1) {
-          const j = map.idx(x, y + 1);
-          const oOwner = map.owner[j];
-          if (oOwner !== owner) {
-            addSeg(general, x, y + 1, x + 1, y + 1);
-            if (owner !== -1) addSeg(nationPath(owner), x, y + 1, x + 1, y + 1);
-            if (oOwner !== -1) addSeg(nationPath(oOwner), x, y + 1, x + 1, y + 1);
-          }
-        }
+    const shapes = new Map();
+    for (const [nationId, edges] of nationEdges) {
+      const loops = traceLoops(edges);
+      const path = new Path2D();
+      for (const loop of loops) {
+        const simplified = simplifyCollinear(loop);
+        if (simplified.length < 3) continue;
+        const smoothed = chaikinSmoothClosed(simplified, CHAIKIN_ITERATIONS);
+        path.moveTo(smoothed[0].x * cellPx, smoothed[0].y * cellPx);
+        for (let i = 1; i < smoothed.length; i++) path.lineTo(smoothed[i].x * cellPx, smoothed[i].y * cellPx);
+        path.closePath();
       }
+      shapes.set(nationId, path);
     }
-    this._generalBorderPath = general;
-    this._nationBorderPaths = perNation;
+    this._nationShapePaths = shapes;
   }
 
   // Labels are sized with a gentler, tightly-capped curve (so a handful of
@@ -384,27 +449,36 @@ class Renderer {
     ctx.translate(this.camera.x, this.camera.y);
     ctx.scale(this.camera.zoom, this.camera.zoom);
 
-    // No bilinear smoothing: keep the terrain fill crisp. Smooth-looking
-    // borders come from the thick, round-jointed ink strokes below, which
-    // are wide enough to visually mask the underlying per-cell jaggedness.
+    // Terrain stays crisp: no bilinear smoothing on the raster buffer.
     ctx.imageSmoothingEnabled = false;
     const cellPx = this.cellPx;
     ctx.drawImage(this._bufCanvas, 0, 0, map.width * cellPx, map.height * cellPx);
 
-    if (this._generalBorderPath) {
-      ctx.strokeStyle = 'rgba(59,42,25,0.6)';
-      ctx.lineWidth = 2.2;
-      ctx.lineJoin = 'round';
-      ctx.lineCap = 'round';
-      ctx.stroke(this._generalBorderPath);
+    // Smoothness in national borders comes from the traced+Chaikin-rounded
+    // vector shapes themselves, not from blurring or thick lines.
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    for (const nation of sim.nations) {
+      if (!nation.alive) continue;
+      const path = this._nationShapePaths.get(nation.id);
+      if (!path) continue;
+      const [wr, wg, wb] = shadeNationColor(nation, BIOME.PLAINS);
+      ctx.fillStyle = `rgba(${wr},${wg},${wb},${TERRITORY_WASH_ALPHA})`;
+      ctx.fill(path, 'evenodd');
+    }
+    for (const nation of sim.nations) {
+      if (!nation.alive) continue;
+      const path = this._nationShapePaths.get(nation.id);
+      if (!path) continue;
+      ctx.strokeStyle = 'rgba(59,42,25,0.65)';
+      ctx.lineWidth = 1.4;
+      ctx.stroke(path);
     }
 
-    if (this.selectedNationId != null && this._nationBorderPaths.has(this.selectedNationId)) {
+    if (this.selectedNationId != null && this._nationShapePaths.has(this.selectedNationId)) {
       ctx.strokeStyle = '#c9a227';
-      ctx.lineWidth = 4.5;
-      ctx.lineJoin = 'round';
-      ctx.lineCap = 'round';
-      ctx.stroke(this._nationBorderPaths.get(this.selectedNationId));
+      ctx.lineWidth = 3.2;
+      ctx.stroke(this._nationShapePaths.get(this.selectedNationId));
     }
 
     for (const nation of sim.nations) {

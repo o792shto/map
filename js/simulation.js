@@ -47,7 +47,9 @@ class Simulation {
     this.recomputeStats(); // establish foodTotal etc before first render
   }
 
-  placeNations(count) {
+  // Random capitals, spread at least `dist` cells apart (relaxed if the map
+  // can't fit that many), skipping any cell already in `avoidIdxs`.
+  pickRandomCapitals(count, avoidIdxs) {
     const map = this.map;
     const landCells = [];
     for (let y = 0; y < map.height; y++) {
@@ -57,14 +59,15 @@ class Simulation {
     }
     const shuffled = this.rng.shuffle(landCells);
     const capitals = [];
+    const taken = capitals.concat(avoidIdxs);
     let dist = Math.max(6, Math.floor(Math.min(map.width, map.height) / (count * 0.9)));
     while (capitals.length < count && dist >= 2) {
       for (const idx of shuffled) {
         if (capitals.length >= count) break;
-        if (capitals.includes(idx)) continue;
+        if (taken.includes(idx) || capitals.includes(idx)) continue;
         const x = idx % map.width, y = Math.floor(idx / map.width);
         let ok = true;
-        for (const c of capitals) {
+        for (const c of taken.concat(capitals)) {
           const cx = c % map.width, cy = Math.floor(c / map.width);
           if (Math.hypot(x - cx, y - cy) < dist) { ok = false; break; }
         }
@@ -72,18 +75,64 @@ class Simulation {
       }
       dist -= 2;
     }
-    const colors = pickDistinctColors(capitals.length, this.rng);
+    return capitals;
+  }
+
+  // Claims land outward from a fresh capital via BFS until `targetSize`
+  // cells are held (or the reachable landmass runs out / bumps into another
+  // nation), so "established" nations start with a real foothold rather
+  // than a single pixel.
+  seedInitialTerritory(nation, targetSize) {
+    const map = this.map;
+    const visited = new Set([nation.capitalIdx]);
+    const queue = [nation.capitalIdx];
+    const claimed = [];
+    let qi = 0;
+    while (qi < queue.length && claimed.length < targetSize) {
+      const cur = queue[qi++];
+      const cx = cur % map.width, cy = Math.floor(cur / map.width);
+      for (const [nx, ny] of map.neighbors4(cx, cy)) {
+        if (!map.isLand(nx, ny)) continue;
+        const ni = map.idx(nx, ny);
+        if (visited.has(ni)) continue;
+        visited.add(ni);
+        if (map.owner[ni] !== -1) continue; // bumped into another nation's land
+        queue.push(ni);
+        claimed.push(ni);
+        if (claimed.length >= targetSize) break;
+      }
+    }
+    for (const idx of claimed) this.claimCell(idx, nation, false);
+  }
+
+  placeNations(count) {
+    const map = this.map;
+    const manual = (this.config.manualCapitals || []).filter(c => c && c.idx != null).slice(0, count);
+    let capitalSpecs = manual.slice();
+    if (capitalSpecs.length < count) {
+      const avoid = capitalSpecs.map(c => c.idx);
+      const extra = this.pickRandomCapitals(count - capitalSpecs.length, avoid);
+      capitalSpecs = capitalSpecs.concat(extra.map(idx => ({ idx })));
+    }
+
+    const colors = pickDistinctColors(capitalSpecs.length, this.rng);
     const personalities = Object.values(PERSONALITY);
     const politicalSystems = Object.values(POLITICAL_SYSTEM);
     const lifestyles = Object.values(LIFESTYLE);
-    capitals.forEach((idx, i) => {
+    const established = this.config.startMode !== 'fromZero';
+    const landTotal = this.countLand();
+    const initialSize = clamp(Math.round(Math.sqrt(landTotal / capitalSpecs.length) * 1.5), 8, 60);
+
+    capitalSpecs.forEach((spec, i) => {
+      const idx = spec.idx;
       const personality = this.rng.choice(personalities);
       const politicalSystem = this.rng.choice(politicalSystems);
       const lifestyle = this.rng.choice(lifestyles);
       const trait = pickTrait(this.rng);
-      const name = generateNationName(this.rng);
+      const name = (spec.name && spec.name.trim()) || generateNationName(this.rng);
       const leaderName = generateLeaderName(this.rng, personality);
       const nation = new Nation(i, name, colors[i], personality, idx, leaderName, politicalSystem, lifestyle, trait);
+      if (spec.name && spec.name.trim()) nation.userNamed = true;
       nation.population = this.rng.float(60, 100);
       nation.military = this.rng.float(20, 40);
       nation.economy = this.rng.float(25, 45);
@@ -91,6 +140,7 @@ class Simulation {
       map.ownerSinceTick[idx] = 0;
       this.nations.push(nation);
       this.nationsById[i] = nation;
+      if (established) this.seedInitialTerritory(nation, initialSize);
       const biomeName = BIOME_INFO[map.biome[idx]].name;
       this.log(`${name}（${POLITICAL_SYSTEM_INFO[politicalSystem].label}・${LIFESTYLE_INFO[lifestyle].label}）が${biomeName}の地に建国された。指導者は${leaderName}（${PERSONALITY_INFO[personality].label}、${trait.label}）。`);
     });
@@ -568,6 +618,18 @@ class Simulation {
     }
   }
 
+  // A cell fully boxed in by the same nation's own territory on every side
+  // (no coastline, no foreign or unclaimed neighbor). Letting these rebel at
+  // the normal rate punches random single-cell holes deep inside otherwise
+  // solid territory, which reads as unrealistic salt-and-pepper noise rather
+  // than a believable secession.
+  isInteriorCell(nation, x, y, map) {
+    for (const [nx, ny] of map.neighbors4(x, y)) {
+      if (map.owner[map.idx(nx, ny)] !== nation.id) return false;
+    }
+    return true;
+  }
+
   processUnrest(aliveNations) {
     const map = this.map;
     const mapScale = Math.max(map.width, map.height) * 0.5;
@@ -594,7 +656,10 @@ class Simulation {
           delta = baseGrowth * 0.5 * distFactor; // already resentful land keeps simmering
         }
         map.unrest[idx] = clamp(u + delta, 0, 100);
-        if (map.unrest[idx] > 75 && this.rng.chance(0.015)) toRebel.push(idx);
+        if (map.unrest[idx] > 75) {
+          const interior = this.isInteriorCell(nation, x, y, map);
+          if (this.rng.chance(interior ? 0.0007 : 0.015)) toRebel.push(idx);
+        }
       }
       for (const idx of toRebel) {
         nation.territory.delete(idx);

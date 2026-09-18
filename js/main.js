@@ -53,6 +53,15 @@
   const msRandomSeedBtn = document.getElementById('msRandomSeedBtn');
   const msGenerateBtn = document.getElementById('msGenerateBtn');
 
+  const startModeButtons = [...document.querySelectorAll('.start-mode-choice')];
+  const fromZeroOptions = document.getElementById('fromZeroOptions');
+  const manualPlacementToggle = document.getElementById('manualPlacementToggle');
+  const manualPlacementPanel = document.getElementById('manualPlacementPanel');
+  const placementPreviewCanvas = document.getElementById('placementPreview');
+  const placementSlotListEl = document.getElementById('placementSlotList');
+  const placementRandomFillBtn = document.getElementById('placementRandomFillBtn');
+  const placementResetBtn = document.getElementById('placementResetBtn');
+
   const DEFAULT_MAP_HINT = 'ホイールでズーム / ドラッグで移動 / クリックで国家を選択';
 
   let sim = null;
@@ -66,6 +75,11 @@
   let lastGeneratedSeed = null;
   let currentPreset = 'random'; // 'random' | 'europe' | 'asia'
   let gameStarted = false;
+  let startMode = 'established'; // 'established' | 'fromZero'
+  let manualPlacementActive = false;
+  let placementSlots = []; // [{idx: number|null, name: string}]
+  let previewMap = null;
+  let previewSeed = null;
 
   function resizeMapCanvas() {
     const rect = mapCanvas.getBoundingClientRect();
@@ -95,10 +109,175 @@
     return options;
   }
 
-  function createNewSimulation(seedOverride) {
+  // --- Manual capital placement (0-start mode) -----------------------------
+
+  function ensurePlacementSlotCount(n) {
+    while (placementSlots.length < n) placementSlots.push({ idx: null, name: '' });
+    while (placementSlots.length > n) placementSlots.pop();
+  }
+
+  function worldMapOptionsFromUI() {
+    const mapOptions = computeMapOptionsFromUI();
+    let width = 240, height = 150;
+    const opts = { mountainThreshold: mapOptions.mountainThreshold };
+    if (mapOptions.presetId) {
+      const preset = PRESET_MAPS[mapOptions.presetId];
+      width = preset.width; height = preset.height;
+      opts.presetMask = decodePresetMask(preset);
+    } else {
+      opts.seaLevel = mapOptions.seaLevel;
+      opts.coastPasses = mapOptions.coastPasses;
+    }
+    return { width, height, opts };
+  }
+
+  function rebuildPreview() {
+    if (!manualPlacementActive) return;
+    let seed = parseInt(seedInput.value, 10);
+    if (!Number.isFinite(seed)) {
+      seed = Math.floor(Math.random() * 1e9);
+      seedInput.value = String(seed);
+    }
+    previewSeed = seed;
+    const { width, height, opts } = worldMapOptionsFromUI();
+    previewMap = new WorldMap(width, height, seed, opts);
+    ensurePlacementSlotCount(parseInt(nationCountSlider.value, 10));
+    for (const slot of placementSlots) slot.idx = null; // terrain changed, positions no longer valid
+    renderPreviewMap();
+    updatePlacementSlotList();
+  }
+
+  function renderPreviewMap() {
+    if (!previewMap) return;
+    const canvas = placementPreviewCanvas;
+    const ctx = canvas.getContext('2d');
+    const map = previewMap;
+    const scaleX = canvas.width / map.width, scaleY = canvas.height / map.height;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    for (let y = 0; y < map.height; y++) {
+      for (let x = 0; x < map.width; x++) {
+        ctx.fillStyle = BIOME_INFO[map.biome[map.idx(x, y)]].color;
+        ctx.fillRect(x * scaleX, y * scaleY, Math.ceil(scaleX), Math.ceil(scaleY));
+      }
+    }
+    placementSlots.forEach((slot, i) => {
+      if (slot.idx == null) return;
+      const x = slot.idx % map.width, y = Math.floor(slot.idx / map.width);
+      const px = (x + 0.5) * scaleX, py = (y + 0.5) * scaleY;
+      ctx.beginPath();
+      ctx.arc(px, py, 6, 0, Math.PI * 2);
+      ctx.fillStyle = '#c9a227';
+      ctx.fill();
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = '#241a08';
+      ctx.stroke();
+      ctx.fillStyle = '#241a08';
+      ctx.font = 'bold 9px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(String(i + 1), px, py);
+    });
+  }
+
+  function updatePlacementSlotList() {
+    placementSlotListEl.innerHTML = placementSlots.map((slot, i) => {
+      const status = slot.idx != null ? '配置済み' : '未配置';
+      return `<div class="placement-slot-row" data-i="${i}">
+        <span class="slot-num">${i + 1}</span>
+        <input type="text" class="slot-name-input" placeholder="国名(自動)" value="${escapeHtml(slot.name)}" maxlength="24">
+        <span class="slot-status ${slot.idx != null ? 'placed' : ''}">${status}</span>
+        <button class="slot-clear" title="配置を解除">×</button>
+      </div>`;
+    }).join('');
+    placementSlotListEl.querySelectorAll('.placement-slot-row').forEach((row) => {
+      const i = parseInt(row.dataset.i, 10);
+      row.querySelector('.slot-name-input').addEventListener('input', (e) => {
+        placementSlots[i].name = e.target.value;
+      });
+      row.querySelector('.slot-clear').addEventListener('click', () => {
+        placementSlots[i].idx = null;
+        renderPreviewMap();
+        updatePlacementSlotList();
+      });
+    });
+  }
+
+  function randomFillRemainingSlots() {
+    if (!previewMap) return;
+    const map = previewMap;
+    const placed = placementSlots.filter(s => s.idx != null).map(s => s.idx);
+    for (const slot of placementSlots) {
+      if (slot.idx != null) continue;
+      for (let attempt = 0; attempt < 400; attempt++) {
+        const x = Math.floor(Math.random() * map.width), y = Math.floor(Math.random() * map.height);
+        if (!map.isLand(x, y)) continue;
+        const idx = map.idx(x, y);
+        if (placed.includes(idx)) continue;
+        const tooClose = placed.some((p) => {
+          const px = p % map.width, py = Math.floor(p / map.width);
+          return Math.hypot(x - px, y - py) < Math.max(4, Math.min(map.width, map.height) / (placementSlots.length * 1.2));
+        });
+        if (tooClose) continue;
+        slot.idx = idx;
+        placed.push(idx);
+        break;
+      }
+    }
+    renderPreviewMap();
+    updatePlacementSlotList();
+  }
+
+  placementPreviewCanvas.addEventListener('click', (e) => {
+    if (!manualPlacementActive || !previewMap) return;
+    const rect = placementPreviewCanvas.getBoundingClientRect();
+    const px = (e.clientX - rect.left) * (placementPreviewCanvas.width / rect.width);
+    const py = (e.clientY - rect.top) * (placementPreviewCanvas.height / rect.height);
+    const map = previewMap;
+    const mx = Math.floor(px / (placementPreviewCanvas.width / map.width));
+    const my = Math.floor(py / (placementPreviewCanvas.height / map.height));
+    if (mx < 0 || my < 0 || mx >= map.width || my >= map.height || !map.isLand(mx, my)) return;
+    const idx = map.idx(mx, my);
+    if (placementSlots.some(s => s.idx === idx)) return;
+    const slot = placementSlots.find(s => s.idx == null);
+    if (!slot) return;
+    slot.idx = idx;
+    renderPreviewMap();
+    updatePlacementSlotList();
+  });
+
+  placementRandomFillBtn.addEventListener('click', randomFillRemainingSlots);
+  placementResetBtn.addEventListener('click', () => {
+    for (const slot of placementSlots) slot.idx = null;
+    renderPreviewMap();
+    updatePlacementSlotList();
+  });
+
+  startModeButtons.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      startMode = btn.dataset.mode;
+      startModeButtons.forEach((b) => b.classList.toggle('active', b === btn));
+      fromZeroOptions.classList.toggle('hidden', startMode !== 'fromZero');
+    });
+  });
+
+  manualPlacementToggle.addEventListener('change', () => {
+    manualPlacementActive = manualPlacementToggle.checked;
+    manualPlacementPanel.classList.toggle('hidden', !manualPlacementActive);
+    if (manualPlacementActive) {
+      ensurePlacementSlotCount(parseInt(nationCountSlider.value, 10));
+      rebuildPreview();
+    }
+  });
+
+  [landAmountSlider, mountainAmountSlider, coastDetailSlider].forEach((el) => {
+    el.addEventListener('input', () => rebuildPreview());
+  });
+  seedInput.addEventListener('change', () => rebuildPreview());
+
+  function createNewSimulation(seedOverride, extraConfig) {
     const nationCount = parseInt(nationCountSlider.value, 10);
     const mapOptions = computeMapOptionsFromUI();
-    const config = { nationCount, endless: endlessToggle.checked, ...mapOptions };
+    const config = { nationCount, endless: endlessToggle.checked, startMode, ...mapOptions, ...(extraConfig || {}) };
     if (seedOverride != null) config.seed = seedOverride;
     sim = new Simulation(config);
     lastGeneratedSeed = sim.seed;
@@ -383,6 +562,11 @@
 
   nationCountSlider.addEventListener('input', () => {
     nationCountLabel.textContent = nationCountSlider.value;
+    if (manualPlacementActive) {
+      ensurePlacementSlotCount(parseInt(nationCountSlider.value, 10));
+      renderPreviewMap();
+      updatePlacementSlotList();
+    }
   });
 
   endlessToggle.addEventListener('change', () => {
@@ -422,6 +606,7 @@
       currentPreset = btn.dataset.preset;
       mapChoiceButtons.forEach((b) => b.classList.toggle('active', b === btn));
       randomMapOptions.classList.toggle('hidden', currentPreset !== 'random');
+      rebuildPreview();
     });
   });
 
@@ -435,11 +620,21 @@
   });
   msRandomSeedBtn.addEventListener('click', () => {
     seedInput.value = String(Math.floor(Math.random() * 1e9));
+    rebuildPreview();
   });
   msGenerateBtn.addEventListener('click', () => {
-    let seed = parseInt(seedInput.value, 10);
-    if (!Number.isFinite(seed) || seed === lastGeneratedSeed) seed = Math.floor(Math.random() * 1e9);
-    createNewSimulation(seed);
+    let seed, extraConfig;
+    if (startMode === 'fromZero' && manualPlacementActive) {
+      randomFillRemainingSlots(); // silently fill any slots the user skipped
+      extraConfig = {
+        manualCapitals: placementSlots.filter(s => s.idx != null).map(s => ({ idx: s.idx, name: s.name })),
+      };
+      seed = previewSeed; // keep the exact terrain the user clicked on
+    } else {
+      seed = parseInt(seedInput.value, 10);
+      if (!Number.isFinite(seed) || seed === lastGeneratedSeed) seed = Math.floor(Math.random() * 1e9);
+    }
+    createNewSimulation(seed, extraConfig);
     setupOverlay.classList.add('hidden');
     paused = false;
     playPauseBtn.textContent = '一時停止';

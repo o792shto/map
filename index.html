@@ -135,6 +135,29 @@
         </label>
       </div>
 
+      <div class="setup-section">
+        <h3>開始モード</h3>
+        <div class="map-choice-row">
+          <button class="start-mode-choice active" data-mode="established">領土を持って開始</button>
+          <button class="start-mode-choice" data-mode="fromZero">首都のみ(0)から</button>
+        </div>
+        <div id="fromZeroOptions" class="hidden">
+          <label class="ctrl checkbox fz-manual-toggle">
+            <input type="checkbox" id="manualPlacementToggle">
+            配置と国名を手動で設定する
+          </label>
+          <div id="manualPlacementPanel" class="hidden">
+            <canvas id="placementPreview" width="380" height="200"></canvas>
+            <p class="ms-hint">地図の陸地をクリックして首都を配置してください（先頭から順に配置されます）。</p>
+            <div id="placementSlotList" class="placement-slot-list"></div>
+            <div class="end-actions">
+              <button id="placementRandomFillBtn" class="btn small">残りをランダム配置</button>
+              <button id="placementResetBtn" class="btn small">配置をリセット</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <button id="msGenerateBtn" class="btn primary large">この世界で始める</button>
     </div>
   </div>
