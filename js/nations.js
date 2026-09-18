@@ -30,6 +30,51 @@ const PERSONALITY_INFO = {
   },
 };
 
+// Political system: how the nation is governed. Adds a second, independent
+// layer of behavioral modifiers on top of personality.
+const POLITICAL_SYSTEM = Object.freeze({
+  MONARCHY: 'monarchy',
+  REPUBLIC: 'republic',
+  FEDERATION: 'federation',
+  THEOCRACY: 'theocracy',
+  TRIBAL: 'tribal',
+});
+const POLITICAL_SYSTEM_INFO = {
+  [POLITICAL_SYSTEM.MONARCHY]:   { label: '君主制',   warChanceMul: 1.1,  allianceMul: 1.0,  unrestMul: 1.0,  militaryMul: 1.05 },
+  [POLITICAL_SYSTEM.REPUBLIC]:   { label: '共和制',   warChanceMul: 0.9,  allianceMul: 1.15, unrestMul: 0.85, militaryMul: 0.95 },
+  [POLITICAL_SYSTEM.FEDERATION]: { label: '連邦制',   warChanceMul: 0.85, allianceMul: 1.1,  unrestMul: 0.7,  expansionMul: 0.9 },
+  [POLITICAL_SYSTEM.THEOCRACY]:  { label: '神権政治', warChanceMul: 1.2,  allianceMul: 0.8,  unrestMul: 0.9,  militaryMul: 1.1 },
+  [POLITICAL_SYSTEM.TRIBAL]:     { label: '部族連合', warChanceMul: 1.15, allianceMul: 0.9,  unrestMul: 1.15, expansionMul: 1.15 },
+};
+
+// Lifestyle: how the nation's people subsist. Mainly shapes expansion style
+// and how strongly they project power overseas.
+const LIFESTYLE = Object.freeze({
+  AGRARIAN: 'agrarian',
+  NOMADIC: 'nomadic',
+  FISHING: 'fishing',
+  MARITIME: 'maritime',
+});
+const LIFESTYLE_INFO = {
+  [LIFESTYLE.AGRARIAN]: { label: '農耕民', foodMul: 1.15, navalMul: 0.75, expansionMul: 1.0 },
+  [LIFESTYLE.NOMADIC]:  { label: '遊牧民', foodMul: 0.9,  navalMul: 0.55, expansionMul: 1.25, unrestMul: 0.8 },
+  [LIFESTYLE.FISHING]:  { label: '漁労民', foodMul: 1.05, navalMul: 1.3,  expansionMul: 0.95 },
+  [LIFESTYLE.MARITIME]: { label: '海洋民族', foodMul: 0.95, navalMul: 1.6, expansionMul: 1.0, militaryMul: 1.05 },
+};
+
+// A single distinguishing trait rolled per nation, layered on top of
+// personality/political system/lifestyle.
+const TRAITS = [
+  { id: 'offense',   label: '侵攻の達人', warChanceMul: 1.2,  militaryMul: 1.1 },
+  { id: 'defense',   label: '鉄壁の守り', militaryMul: 1.15,  unrestMul: 0.85 },
+  { id: 'trade',     label: '交易の民',   allianceMul: 1.3,   expansionMul: 0.9 },
+  { id: 'resilient', label: '不屈の意志', unrestMul: 0.7 },
+  { id: 'ambitious', label: '拡張の野心', expansionMul: 1.3,  warChanceMul: 1.1 },
+  { id: 'diplomat',  label: '外交巧者',   allianceMul: 1.25,  warChanceMul: 0.8 },
+];
+
+function pickTrait(rng) { return rng.choice(TRAITS); }
+
 const NAME_PREFIX = ['アル', 'ヴェル', 'カル', 'ドラ', 'エス', 'フィン', 'ガル', 'ハイ', 'イル', 'ジョ', 'ケル', 'ロン', 'マル', 'ノル', 'オル', 'パル', 'クイ', 'ラス', 'セル', 'ター'];
 const NAME_SUFFIX = ['ディア', 'ニア', 'ゴス', 'リア', 'ドール', 'ラント', 'ヴィア', 'モア', 'ノス', 'シア', 'バル', 'テック', 'ザール', 'ミア', 'クス'];
 const STATE_SUFFIX = ['帝国', '王国', '共和国', '首長国', '連邦', '公国'];
@@ -84,14 +129,19 @@ function pickDistinctColors(count, rng) {
   return colors;
 }
 
+const MOD_KEYS = ['expansionMul', 'warChanceMul', 'allianceMul', 'betrayalMul', 'militaryMul', 'unrestMul', 'navalMul', 'foodMul'];
+
 class Nation {
-  constructor(id, name, color, personality, capitalIdx, leaderName) {
+  constructor(id, name, color, personality, capitalIdx, leaderName, politicalSystem, lifestyle, trait) {
     this.id = id;
     this.name = name;
     this.userNamed = false;
     this.leaderName = leaderName;
     this.color = color;
     this.personality = personality;
+    this.politicalSystem = politicalSystem;
+    this.lifestyle = lifestyle;
+    this.trait = trait;
     this.capitalIdx = capitalIdx;
     this.territory = new Set([capitalIdx]);
     this.population = 0;
@@ -100,11 +150,34 @@ class Nation {
     this.alive = true;
     this.allies = new Set();
     this.relations = new Map(); // otherId -> 'war' (absence = peace)
+    this.relationScore = new Map(); // otherId -> -100..100 goodwill, independent of war/peace state
     this.warSinceTick = new Map(); // otherId -> turn war began
     this.heroBoostTicks = 0;
     this.diedAtTick = null;
     this.foundedAtTick = 0;
+    this.directiveTarget = null; // player-issued expansion focus: {idx, expiresAtTurn}
     this.history = []; // {turn, text} major events for this nation's own chronicle
+    this.mods = {};
+    this.computeMods();
+  }
+
+  // Multiplies personality + political system + lifestyle + rolled trait
+  // together into one flat set of modifiers used throughout the sim, so a
+  // nation reads as the sum of all four layers rather than any one alone.
+  computeMods() {
+    const layers = [
+      PERSONALITY_INFO[this.personality],
+      POLITICAL_SYSTEM_INFO[this.politicalSystem],
+      LIFESTYLE_INFO[this.lifestyle],
+      this.trait,
+    ];
+    const mods = {};
+    for (const key of MOD_KEYS) {
+      let v = 1;
+      for (const layer of layers) if (layer && layer[key] != null) v *= layer[key];
+      mods[key] = v;
+    }
+    this.mods = mods;
   }
 
   get info() { return PERSONALITY_INFO[this.personality]; }
@@ -117,8 +190,21 @@ class Nation {
 
   isAtWarWith(otherId) { return this.relations.get(otherId) === 'war'; }
 
+  getRelation(otherId) { return this.relationScore.get(otherId) || 0; }
+  adjustRelation(otherId, delta) {
+    this.relationScore.set(otherId, clamp(this.getRelation(otherId) + delta, -100, 100));
+  }
+
   recordEvent(turn, text) {
     this.history.push({ turn, text });
     if (this.history.length > 60) this.history.shift();
   }
+}
+
+function relationLabel(score) {
+  if (score <= -50) return '険悪';
+  if (score <= -15) return '敵対的';
+  if (score < 15) return '中立';
+  if (score < 50) return '友好的';
+  return '親密';
 }

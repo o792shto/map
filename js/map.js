@@ -22,7 +22,7 @@ const BIOME_INFO = {
 };
 
 class WorldMap {
-  constructor(width, height, seed) {
+  constructor(width, height, seed, options = {}) {
     this.width = width;
     this.height = height;
     this.seed = seed;
@@ -38,7 +38,10 @@ class WorldMap {
     this.unrest = new Float32Array(n);
     this.ownerSinceTick = new Int32Array(n);
     this.coastal = null; // Uint8Array, computed lazily
-    this.seaLevel = 0.35;
+    // Generation knobs, tunable from the map settings panel.
+    this.seaLevel = options.seaLevel != null ? options.seaLevel : 0.35;
+    this.mountainThreshold = options.mountainThreshold != null ? options.mountainThreshold : 0.72;
+    this.coastPasses = options.coastPasses != null ? options.coastPasses : 2;
     this.generate();
   }
 
@@ -89,13 +92,13 @@ class WorldMap {
       }
     }
 
-    this.smoothCoastline(2);
+    this.smoothCoastline(this.coastPasses);
   }
 
   classifyBiome(e, m) {
     if (e < this.seaLevel) return BIOME.OCEAN;
     const ne = (e - this.seaLevel) / (1 - this.seaLevel);
-    if (ne > 0.72) return BIOME.MOUNTAIN;
+    if (ne > this.mountainThreshold) return BIOME.MOUNTAIN;
     if (m < 0.32) return BIOME.DESERT;
     if (m < 0.52) return BIOME.PLAINS;
     if (m < 0.72) return BIOME.GRASSLAND;

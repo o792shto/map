@@ -28,6 +28,7 @@
         <input type="checkbox" id="endlessToggle">
         エンドレスモード
       </label>
+      <button id="mapSettingsBtn" class="btn">マップ設定</button>
       <button id="regenerateBtn" class="btn">Regenerate</button>
     </div>
   </header>
@@ -35,8 +36,8 @@
   <main class="layout">
     <div class="map-area">
       <canvas id="mapCanvas"></canvas>
-      <div class="map-hint">ホイールでズーム / ドラッグで移動 / クリックで国家を選択</div>
-      <div class="turn-badge" id="turnBadge">Turn 0</div>
+      <div class="map-hint" id="mapHint">ホイールでズーム / ドラッグで移動 / クリックで国家を選択</div>
+      <div class="turn-badge" id="turnBadge">0年</div>
 
       <div id="nationDetail" class="nation-detail hidden">
         <div class="nation-detail-header">
@@ -47,12 +48,24 @@
         <div class="nation-detail-body">
           <div class="nd-row"><span class="nd-label">指導者</span><span id="ndLeader"></span></div>
           <div class="nd-row"><span class="nd-label">性格</span><span id="ndPersonality"></span></div>
+          <div class="nd-row"><span class="nd-label">政治体制</span><span id="ndPolitical"></span></div>
+          <div class="nd-row"><span class="nd-label">生活様式</span><span id="ndLifestyle"></span></div>
+          <div class="nd-row"><span class="nd-label">特性</span><span id="ndTrait"></span></div>
           <div class="nd-row"><span class="nd-label">建国</span><span id="ndFounded"></span></div>
           <div class="nd-stats">
             <div><span class="nd-label">人口</span><b id="ndPop"></b></div>
             <div><span class="nd-label">軍事力</span><b id="ndMil"></b></div>
             <div><span class="nd-label">経済力</span><b id="ndEco"></b></div>
             <div><span class="nd-label">領土</span><b id="ndTerritory"></b></div>
+          </div>
+          <div class="nd-section" id="ndDirectiveSection">
+            <h3>指令</h3>
+            <div class="nd-directives">
+              <button id="ndDirExpand" class="btn small">拡張方向を指示</button>
+              <button id="ndDirWar" class="btn small danger">宣戦布告</button>
+              <button id="ndDirAlly" class="btn small">同盟を提案</button>
+              <button id="ndDirPeace" class="btn small">休戦を提案</button>
+            </div>
           </div>
           <div class="nd-section">
             <h3>外交関係</h3>
@@ -61,6 +74,33 @@
           <div class="nd-section">
             <h3>年代記</h3>
             <div id="ndHistory" class="nd-history"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="mapSettingsOverlay" class="overlay hidden">
+        <div class="end-modal map-settings-modal">
+          <h2>マップ設定</h2>
+          <p class="ms-hint">好みの地形になるまで何度でも再生成できます。</p>
+          <label class="ms-row">
+            陸地の広さ
+            <input type="range" id="landAmountSlider" min="0" max="100" value="55">
+          </label>
+          <label class="ms-row">
+            山地の量
+            <input type="range" id="mountainAmountSlider" min="0" max="100" value="45">
+          </label>
+          <label class="ms-row">
+            海岸線の複雑さ
+            <input type="range" id="coastDetailSlider" min="0" max="4" value="2">
+          </label>
+          <label class="ms-row">
+            シード
+            <input type="text" id="seedInput" class="ms-seed-input" inputmode="numeric">
+          </label>
+          <div class="end-actions">
+            <button id="msRandomSeedBtn" class="btn">ランダムなシード</button>
+            <button id="msGenerateBtn" class="btn primary">この設定で生成</button>
           </div>
         </div>
       </div>

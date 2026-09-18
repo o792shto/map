@@ -12,6 +12,7 @@
   const nationListEl = document.getElementById('nationList');
   const logListEl = document.getElementById('logList');
   const turnBadge = document.getElementById('turnBadge');
+  const mapHint = document.getElementById('mapHint');
   const endOverlay = document.getElementById('endOverlay');
   const endTitle = document.getElementById('endTitle');
   const endSummary = document.getElementById('endSummary');
@@ -25,6 +26,9 @@
   const ndCloseBtn = document.getElementById('ndCloseBtn');
   const ndLeader = document.getElementById('ndLeader');
   const ndPersonality = document.getElementById('ndPersonality');
+  const ndPolitical = document.getElementById('ndPolitical');
+  const ndLifestyle = document.getElementById('ndLifestyle');
+  const ndTrait = document.getElementById('ndTrait');
   const ndFounded = document.getElementById('ndFounded');
   const ndPop = document.getElementById('ndPop');
   const ndMil = document.getElementById('ndMil');
@@ -32,6 +36,22 @@
   const ndTerritory = document.getElementById('ndTerritory');
   const ndRelations = document.getElementById('ndRelations');
   const ndHistory = document.getElementById('ndHistory');
+  const ndDirectiveSection = document.getElementById('ndDirectiveSection');
+  const ndDirExpand = document.getElementById('ndDirExpand');
+  const ndDirWar = document.getElementById('ndDirWar');
+  const ndDirAlly = document.getElementById('ndDirAlly');
+  const ndDirPeace = document.getElementById('ndDirPeace');
+
+  const mapSettingsBtn = document.getElementById('mapSettingsBtn');
+  const mapSettingsOverlay = document.getElementById('mapSettingsOverlay');
+  const landAmountSlider = document.getElementById('landAmountSlider');
+  const mountainAmountSlider = document.getElementById('mountainAmountSlider');
+  const coastDetailSlider = document.getElementById('coastDetailSlider');
+  const seedInput = document.getElementById('seedInput');
+  const msRandomSeedBtn = document.getElementById('msRandomSeedBtn');
+  const msGenerateBtn = document.getElementById('msGenerateBtn');
+
+  const DEFAULT_MAP_HINT = 'ホイールでズーム / ドラッグで移動 / クリックで国家を選択';
 
   let sim = null;
   let renderer = null;
@@ -40,6 +60,8 @@
   let tickAccumulator = 0;
   let lastFrameTime = null;
   let selectedNationId = null;
+  let pendingDirective = null; // {type: 'expand'|'war'|'ally'|'peace', sourceId}
+  let lastGeneratedSeed = null;
 
   function resizeMapCanvas() {
     const rect = mapCanvas.getBoundingClientRect();
@@ -53,9 +75,25 @@
     }
   }
 
-  function createNewSimulation() {
+  function computeMapOptionsFromUI() {
+    const landAmount = parseInt(landAmountSlider.value, 10);
+    const mountainAmount = parseInt(mountainAmountSlider.value, 10);
+    const coastDetail = parseInt(coastDetailSlider.value, 10);
+    return {
+      seaLevel: 0.56 - (landAmount / 100) * 0.42,
+      mountainThreshold: 0.9 - (mountainAmount / 100) * 0.5,
+      coastPasses: 4 - coastDetail,
+    };
+  }
+
+  function createNewSimulation(seedOverride) {
     const nationCount = parseInt(nationCountSlider.value, 10);
-    sim = new Simulation({ nationCount, endless: endlessToggle.checked });
+    const mapOptions = computeMapOptionsFromUI();
+    const config = { nationCount, endless: endlessToggle.checked, ...mapOptions };
+    if (seedOverride != null) config.seed = seedOverride;
+    sim = new Simulation(config);
+    lastGeneratedSeed = sim.seed;
+    seedInput.value = String(sim.seed);
     sim.onLog = (entry) => appendLogEntry(entry);
     sim.onEnd = () => showEndOverlay();
     if (!renderer) {
@@ -71,13 +109,67 @@
     for (const entry of sim.eventLog) appendLogEntry(entry);
     endOverlay.classList.add('hidden');
     tickAccumulator = 0;
+    pendingDirective = null;
+    updateMapHint();
     selectNation(null);
     updateTurnBadge();
     updateNationList();
     chart.render(sim);
   }
 
+  function updateMapHint() {
+    if (!pendingDirective) {
+      mapHint.textContent = DEFAULT_MAP_HINT;
+      mapHint.classList.remove('active-directive');
+      return;
+    }
+    const labels = {
+      expand: '拡張したい地点を地図上でクリック（Escでキャンセル）',
+      war: '宣戦布告する相手の国家を地図か一覧でクリック（Escでキャンセル）',
+      ally: '同盟を提案する相手の国家を地図か一覧でクリック（Escでキャンセル）',
+      peace: '休戦を提案する相手の国家を地図か一覧でクリック（Escでキャンセル）',
+    };
+    mapHint.textContent = labels[pendingDirective.type];
+    mapHint.classList.add('active-directive');
+  }
+
+  function startDirective(type) {
+    if (selectedNationId == null || !sim.nationsById[selectedNationId] || !sim.nationsById[selectedNationId].alive) return;
+    pendingDirective = { type, sourceId: selectedNationId };
+    updateMapHint();
+  }
+
+  function cancelDirective() {
+    pendingDirective = null;
+    updateMapHint();
+  }
+
+  function resolveDirectiveWithNation(targetId) {
+    const { type, sourceId } = pendingDirective;
+    pendingDirective = null;
+    updateMapHint();
+    if (targetId == null || targetId === sourceId) return;
+    if (type === 'war') sim.issueDeclareWar(sourceId, targetId);
+    else if (type === 'ally') sim.issueProposeAlliance(sourceId, targetId);
+    else if (type === 'peace') sim.issueSuePeace(sourceId, targetId);
+    updateNationList();
+    updateNationDetail();
+  }
+
+  function resolveDirectiveWithCell(cellIdx) {
+    const { sourceId } = pendingDirective;
+    pendingDirective = null;
+    updateMapHint();
+    if (cellIdx != null) sim.issueExpansionDirective(sourceId, cellIdx);
+  }
+
   function onMapClick(cellIdx) {
+    if (pendingDirective) {
+      if (pendingDirective.type === 'expand') { resolveDirectiveWithCell(cellIdx); return; }
+      const owner = cellIdx != null ? sim.map.owner[cellIdx] : null;
+      resolveDirectiveWithNation(owner === -1 ? null : owner);
+      return;
+    }
     if (cellIdx == null) { selectNation(null); return; }
     const owner = sim.map.owner[cellIdx];
     selectNation(owner === -1 ? null : owner);
@@ -93,7 +185,7 @@
   function appendLogEntry(entry) {
     const div = document.createElement('div');
     div.className = 'log-entry';
-    div.innerHTML = `<span class="t">T${entry.turn}</span>${escapeHtml(entry.text)}`;
+    div.innerHTML = `<span class="t">${entry.turn}年</span>${escapeHtml(entry.text)}`;
     logListEl.appendChild(div);
     while (logListEl.children.length > 250) logListEl.removeChild(logListEl.firstChild);
     logListEl.scrollTop = logListEl.scrollHeight;
@@ -104,7 +196,7 @@
   }
 
   function updateTurnBadge() {
-    turnBadge.textContent = `Turn ${sim.turn}` + (sim.config.endless ? ' (endless)' : ` / ${sim.config.maxTurns}`);
+    turnBadge.textContent = `${sim.turn}年` + (sim.config.endless ? '（エンドレス）' : ` / ${sim.config.maxTurns}年`);
   }
 
   function warCount(nation) {
@@ -131,7 +223,15 @@
       </div>`;
     }).join('');
     nationListEl.querySelectorAll('.nation-row').forEach((row) => {
-      row.addEventListener('click', () => selectNation(parseInt(row.dataset.id, 10)));
+      row.addEventListener('click', () => {
+        const id = parseInt(row.dataset.id, 10);
+        if (pendingDirective) {
+          if (pendingDirective.type === 'expand') return; // list rows aren't map locations
+          resolveDirectiveWithNation(id);
+          return;
+        }
+        selectNation(id);
+      });
     });
   }
 
@@ -146,29 +246,44 @@
     if (document.activeElement !== ndNameInput) ndNameInput.value = n.name;
     ndLeader.textContent = n.leaderName || '不明';
     ndPersonality.textContent = PERSONALITY_INFO[n.personality].label;
-    ndFounded.textContent = `T${n.foundedAtTick}`;
+    ndPolitical.textContent = POLITICAL_SYSTEM_INFO[n.politicalSystem].label;
+    ndLifestyle.textContent = LIFESTYLE_INFO[n.lifestyle].label;
+    ndTrait.textContent = n.trait ? n.trait.label : '-';
+    ndFounded.textContent = `${n.foundedAtTick}年`;
     ndPop.textContent = formatNumber(n.population);
     ndMil.textContent = formatNumber(n.military);
     ndEco.textContent = formatNumber(n.economy);
     const landTotal = countLandCells(sim.map);
     const pct = landTotal > 0 ? ((n.territorySize / landTotal) * 100).toFixed(1) : '0.0';
-    ndTerritory.textContent = n.alive ? `${n.territorySize}マス (${pct}%)` : `滅亡 (T${n.diedAtTick})`;
+    ndTerritory.textContent = n.alive ? `${n.territorySize}マス (${pct}%)` : `滅亡 (${n.diedAtTick}年)`;
+    ndDirectiveSection.style.display = n.alive ? '' : 'none';
 
     const chips = [];
+    const warIds = new Set();
     for (const [otherId, state] of n.relations) {
       if (state !== 'war') continue;
+      warIds.add(otherId);
       const other = sim.nationsById[otherId];
-      if (other) chips.push(`<span class="nd-chip war">${escapeHtml(other.name)}と交戦中</span>`);
+      if (other) chips.push(`<span class="nd-chip war">${escapeHtml(other.name)}: 交戦中</span>`);
     }
     for (const otherId of n.allies) {
       const other = sim.nationsById[otherId];
-      if (other) chips.push(`<span class="nd-chip ally">${escapeHtml(other.name)}と同盟</span>`);
+      if (other) chips.push(`<span class="nd-chip ally">${escapeHtml(other.name)}: 同盟</span>`);
+    }
+    for (const [otherId, score] of n.relationScore) {
+      if (warIds.has(otherId) || n.allies.has(otherId)) continue;
+      if (Math.abs(score) < 15) continue;
+      const other = sim.nationsById[otherId];
+      if (!other || !other.alive) continue;
+      const cls = score > 0 ? 'friendly' : 'hostile';
+      const sign = score > 0 ? '+' : '';
+      chips.push(`<span class="nd-chip ${cls}">${escapeHtml(other.name)}: ${relationLabel(score)}(${sign}${Math.round(score)})</span>`);
     }
     ndRelations.innerHTML = chips.length ? chips.join('') : '<span class="nd-empty">目立った外交関係はない</span>';
 
     const hist = n.history.slice().reverse();
     ndHistory.innerHTML = hist.length
-      ? hist.map(h => `<div class="nd-history-entry"><span class="t">T${h.turn}</span>${escapeHtml(h.text)}</div>`).join('')
+      ? hist.map(h => `<div class="nd-history-entry"><span class="t">${h.turn}年</span>${escapeHtml(h.text)}</div>`).join('')
       : '<div class="nd-empty">記録なし</div>';
   }
 
@@ -185,6 +300,10 @@
     }
   });
   ndCloseBtn.addEventListener('click', () => selectNation(null));
+  ndDirExpand.addEventListener('click', () => startDirective('expand'));
+  ndDirWar.addEventListener('click', () => startDirective('war'));
+  ndDirAlly.addEventListener('click', () => startDirective('ally'));
+  ndDirPeace.addEventListener('click', () => startDirective('peace'));
 
   let cachedLandTotal = null;
   function countLandCells(map) {
@@ -200,8 +319,8 @@
     playPauseBtn.textContent = '再生';
     endTitle.textContent = sim.winner ? '勝者が決定しました' : 'シミュレーション終了';
     endSummary.textContent = sim.winner
-      ? `${sim.winner.name}（${PERSONALITY_INFO[sim.winner.personality].label}、指導者 ${sim.winner.leaderName}）が最終ターン ${sim.turn} で天下を統一、または最大の勢力となりました。`
-      : `ターン ${sim.turn} で全ての国家が滅亡しました。`;
+      ? `${sim.winner.name}（${PERSONALITY_INFO[sim.winner.personality].label}、指導者 ${sim.winner.leaderName}）が${sim.turn}年で天下を統一、または最大の勢力となりました。`
+      : `${sim.turn}年で全ての国家が滅亡しました。`;
     const landTotal = countLandCells(sim.map);
     const ranked = sim.nations.slice().sort((a, b) => {
       if (a.alive !== b.alive) return a.alive ? -1 : 1;
@@ -210,7 +329,7 @@
     });
     endRanking.innerHTML = ranked.map((n, i) => {
       const pct = landTotal > 0 ? ((n.territorySize / landTotal) * 100).toFixed(1) : '0.0';
-      const status = n.alive ? `領土 ${pct}%` : `${n.diedAtTick}ターンに滅亡`;
+      const status = n.alive ? `領土 ${pct}%` : `${n.diedAtTick}年に滅亡`;
       return `<div class="rank-row"><b>${i + 1}.</b><span class="nation-swatch" style="background:${n.color}"></span>${escapeHtml(n.name)} <span class="nation-meta">${status}</span></div>`;
     }).join('');
     endOverlay.classList.remove('hidden');
@@ -282,6 +401,30 @@
     paused = false;
     playPauseBtn.textContent = '一時停止';
     updateTurnBadge();
+  });
+
+  mapSettingsBtn.addEventListener('click', () => {
+    mapSettingsOverlay.classList.remove('hidden');
+  });
+  mapSettingsOverlay.addEventListener('click', (e) => {
+    if (e.target === mapSettingsOverlay) mapSettingsOverlay.classList.add('hidden');
+  });
+  msRandomSeedBtn.addEventListener('click', () => {
+    seedInput.value = String(Math.floor(Math.random() * 1e9));
+  });
+  msGenerateBtn.addEventListener('click', () => {
+    let seed = parseInt(seedInput.value, 10);
+    if (!Number.isFinite(seed) || seed === lastGeneratedSeed) seed = Math.floor(Math.random() * 1e9);
+    createNewSimulation(seed);
+    mapSettingsOverlay.classList.add('hidden');
+    paused = false;
+    playPauseBtn.textContent = '一時停止';
+  });
+
+  window.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (pendingDirective) { cancelDirective(); return; }
+    if (!mapSettingsOverlay.classList.contains('hidden')) mapSettingsOverlay.classList.add('hidden');
   });
 
   window.addEventListener('resize', resizeMapCanvas);

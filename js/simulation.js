@@ -17,7 +17,11 @@ class Simulation {
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.seed = (config.seed != null) ? config.seed : Math.floor(Math.random() * 1e9);
     this.rng = new RNG(this.seed);
-    this.map = new WorldMap(this.config.width, this.config.height, this.seed);
+    this.map = new WorldMap(this.config.width, this.config.height, this.seed, {
+      seaLevel: this.config.seaLevel,
+      mountainThreshold: this.config.mountainThreshold,
+      coastPasses: this.config.coastPasses,
+    });
     this.nations = [];
     this.nationsById = {};
     this.turn = 0;
@@ -61,11 +65,16 @@ class Simulation {
     }
     const colors = pickDistinctColors(capitals.length, this.rng);
     const personalities = Object.values(PERSONALITY);
+    const politicalSystems = Object.values(POLITICAL_SYSTEM);
+    const lifestyles = Object.values(LIFESTYLE);
     capitals.forEach((idx, i) => {
       const personality = this.rng.choice(personalities);
+      const politicalSystem = this.rng.choice(politicalSystems);
+      const lifestyle = this.rng.choice(lifestyles);
+      const trait = pickTrait(this.rng);
       const name = generateNationName(this.rng);
       const leaderName = generateLeaderName(this.rng, personality);
-      const nation = new Nation(i, name, colors[i], personality, idx, leaderName);
+      const nation = new Nation(i, name, colors[i], personality, idx, leaderName, politicalSystem, lifestyle, trait);
       nation.population = this.rng.float(60, 100);
       nation.military = this.rng.float(20, 40);
       nation.economy = this.rng.float(25, 45);
@@ -74,7 +83,7 @@ class Simulation {
       this.nations.push(nation);
       this.nationsById[i] = nation;
       const biomeName = BIOME_INFO[map.biome[idx]].name;
-      this.log(`${name}が${biomeName}の地に建国された。指導者は${leaderName}（${PERSONALITY_INFO[personality].label}）。`);
+      this.log(`${name}（${POLITICAL_SYSTEM_INFO[politicalSystem].label}・${LIFESTYLE_INFO[lifestyle].label}）が${biomeName}の地に建国された。指導者は${leaderName}（${PERSONALITY_INFO[personality].label}、${trait.label}）。`);
     });
   }
 
@@ -164,18 +173,33 @@ class Simulation {
   processExpansion(aliveNations, expansionCandidates) {
     const map = this.map;
     for (const nation of aliveNations) {
+      if (nation.directiveTarget && this.turn > nation.directiveTarget.expiresAtTurn) {
+        nation.directiveTarget = null;
+      }
       const candidates = expansionCandidates.get(nation.id);
       if (!candidates || candidates.size === 0) continue;
-      const info = nation.info;
+      const mods = nation.mods;
       const power = (nation.population * 0.4 + nation.economy * 0.6) / 120;
-      const maxClaims = 3;
+      const directed = nation.directiveTarget;
+      const maxClaims = directed ? 5 : 3;
       let claims = 0;
-      const candArr = this.rng.shuffle([...candidates]);
+      let candArr = [...candidates];
+      if (directed) {
+        const tx = directed.idx % map.width, ty = Math.floor(directed.idx / map.width);
+        candArr.sort((c1, c2) => {
+          const x1 = c1 % map.width, y1 = Math.floor(c1 / map.width);
+          const x2 = c2 % map.width, y2 = Math.floor(c2 / map.width);
+          return Math.hypot(x1 - tx, y1 - ty) - Math.hypot(x2 - tx, y2 - ty);
+        });
+      } else {
+        candArr = this.rng.shuffle(candArr);
+      }
       for (const cellIdx of candArr) {
         if (claims >= maxClaims) break;
         const biome = map.biome[cellIdx];
         const cost = BIOME_INFO[biome].cost;
-        const prob = clamp(0.5 * power * info.expansionMul / cost, 0, 0.9);
+        let prob = clamp(0.5 * power * mods.expansionMul / cost, 0, 0.9);
+        if (directed) prob = clamp(prob * 1.6, 0, 0.95); // player-directed expansion pushes harder
         if (this.rng.chance(prob)) {
           this.claimCell(cellIdx, nation, false);
           claims++;
@@ -239,7 +263,7 @@ class Simulation {
           if (owner === -1) {
             if (colonized >= MAX_COLONIZE) continue;
             const power = (nation.population * 0.4 + nation.economy * 0.6) / 120;
-            const prob = clamp(0.1 * power * nation.info.expansionMul, 0, 0.3);
+            const prob = clamp(0.1 * power * nation.mods.expansionMul * nation.mods.navalMul, 0, 0.3);
             if (this.rng.chance(prob)) {
               this.claimCell(targetIdx, nation, false);
               colonized++;
@@ -282,6 +306,8 @@ class Simulation {
     defender.relations.set(attacker.id, 'war');
     attacker.warSinceTick.set(defender.id, this.turn);
     defender.warSinceTick.set(attacker.id, this.turn);
+    attacker.adjustRelation(defender.id, -40);
+    defender.adjustRelation(attacker.id, -40);
     this.log(`${attacker.name}（${attacker.leaderName}）が${defender.name}に宣戦布告した。理由: ${reason}`);
     attacker.recordEvent(this.turn, `${defender.name}に宣戦布告（${reason}）`);
     defender.recordEvent(this.turn, `${attacker.name}より宣戦布告を受けた（${reason}）`);
@@ -304,22 +330,35 @@ class Simulation {
       if (nationA.isAtWarWith(nationB.id)) continue;
 
       if (nationA.allies.has(nationB.id)) {
-        const betrayChance = 0.006 * Math.max(nationA.info.betrayalMul, nationB.info.betrayalMul);
+        const betrayChance = 0.006 * Math.max(nationA.mods.betrayalMul, nationB.mods.betrayalMul);
         if (this.rng.chance(betrayChance)) {
           nationA.allies.delete(nationB.id);
           nationB.allies.delete(nationA.id);
           const traitor = this.rng.chance(0.5) ? nationA : nationB;
           const victim = traitor === nationA ? nationB : nationA;
+          traitor.adjustRelation(victim.id, -60);
+          victim.adjustRelation(traitor.id, -60);
           this.declareWar(traitor, victim, '同盟の破棄と裏切り');
+        } else {
+          nationA.adjustRelation(nationB.id, 0.4);
+          nationB.adjustRelation(nationA.id, 0.4);
         }
         continue;
       }
 
-      const aggressiveness = (nationA.info.warChanceMul + nationB.info.warChanceMul) / 2;
-      const warChance = 0.01 * aggressiveness;
+      // Shared political system or lifestyle breeds slow cultural affinity;
+      // otherwise relations drift gently back toward neutral.
+      const affinity = (nationA.politicalSystem === nationB.politicalSystem || nationA.lifestyle === nationB.lifestyle) ? 0.06 : -0.02;
+      nationA.adjustRelation(nationB.id, affinity);
+      nationB.adjustRelation(nationA.id, affinity);
+
+      const relScore = nationA.getRelation(nationB.id);
+      const aggressiveness = (nationA.mods.warChanceMul + nationB.mods.warChanceMul) / 2;
+      const relationFactor = clamp(1 - relScore / 120, 0.4, 1.8);
+      const warChance = 0.01 * aggressiveness * relationFactor;
       if (this.rng.chance(warChance)) {
-        const scoreA = nationA.strength() * nationA.info.warChanceMul + 1;
-        const scoreB = nationB.strength() * nationB.info.warChanceMul + 1;
+        const scoreA = nationA.strength() * nationA.mods.warChanceMul + 1;
+        const scoreB = nationB.strength() * nationB.mods.warChanceMul + 1;
         const initiator = this.rng.chance(scoreA / (scoreA + scoreB)) ? nationA : nationB;
         const target = initiator === nationA ? nationB : nationA;
         this.declareWar(initiator, target, pickWarReason(this.rng));
@@ -367,6 +406,8 @@ class Simulation {
     const consumption = 0.12;
     winner.military = Math.max(0, winner.military - winner.military * consumption * 0.5);
     loser.military = Math.max(0, loser.military - loser.military * consumption);
+    winner.adjustRelation(loser.id, -3);
+    loser.adjustRelation(winner.id, -3);
 
     if (captured.length > 0) {
       this.log(`${winner.name}が${loser.name}と交戦し、${captured.length}地域を奪取した。`);
@@ -400,13 +441,17 @@ class Simulation {
         const combinedMilitary = nation.military + other.military;
         const combinedEconomy = (nation.economy + other.economy) * 0.8 + 1;
         const exhaustion = clamp(1 - combinedMilitary / combinedEconomy, 0, 1);
-        const warDesire = (nation.info.warChanceMul + other.info.warChanceMul) / 2;
-        const peaceChance = clamp((0.002 + duration * 0.00004 + exhaustion * 0.01) / warDesire, 0, 0.05);
+        const warDesire = (nation.mods.warChanceMul + other.mods.warChanceMul) / 2;
+        const relScore = nation.getRelation(otherId);
+        const relationFactor = clamp(1 + relScore / 150, 0.5, 2);
+        const peaceChance = clamp((0.002 + duration * 0.00004 + exhaustion * 0.01) * relationFactor / warDesire, 0, 0.06);
         if (this.rng.chance(peaceChance)) {
           nation.relations.delete(otherId);
           other.relations.delete(nation.id);
           nation.warSinceTick.delete(otherId);
           other.warSinceTick.delete(nation.id);
+          nation.adjustRelation(otherId, 15);
+          other.adjustRelation(nation.id, 15);
           this.log(`${nation.name}と${other.name}が休戦協定を結んだ。`);
           nation.recordEvent(this.turn, `${other.name}と休戦`);
           other.recordEvent(this.turn, `${nation.name}と休戦`);
@@ -418,7 +463,7 @@ class Simulation {
   processEvents(aliveNations) {
     for (const nation of aliveNations) {
       if (nation.territorySize === 0) continue;
-      const info = nation.info;
+      const mods = nation.mods;
 
       if (this.rng.chance(0.0025)) {
         nation.population = Math.max(1, nation.population * 0.65);
@@ -434,16 +479,18 @@ class Simulation {
         continue;
       }
 
-      if (this.rng.chance(0.003 * info.allianceMul)) {
+      if (this.rng.chance(0.003 * mods.allianceMul)) {
         const neighborIds = [...(this._neighborMap.get(nation.id) || [])];
         const candidates = neighborIds.filter(id =>
-          !nation.allies.has(id) && !nation.isAtWarWith(id) &&
+          !nation.allies.has(id) && !nation.isAtWarWith(id) && nation.getRelation(id) > -10 &&
           this.nationsById[id] && this.nationsById[id].alive);
         if (candidates.length) {
           const otherId = this.rng.choice(candidates);
           const other = this.nationsById[otherId];
           nation.allies.add(otherId);
           other.allies.add(nation.id);
+          nation.adjustRelation(otherId, 25);
+          other.adjustRelation(nation.id, 25);
           this.log(`${nation.name}と${other.name}が同盟を締結した。`);
           nation.recordEvent(this.turn, `${other.name}と同盟`);
           other.recordEvent(this.turn, `${nation.name}と同盟`);
@@ -463,7 +510,7 @@ class Simulation {
     const mapScale = Math.max(map.width, map.height) * 0.5;
     for (const nation of aliveNations) {
       if (nation.territorySize === 0) continue;
-      const baseGrowth = 0.14 * nation.info.unrestMul;
+      const baseGrowth = 0.14 * nation.mods.unrestMul;
       const capX = nation.capitalIdx % map.width, capY = Math.floor(nation.capitalIdx / map.width);
       const toRebel = [];
       for (const idx of nation.territory) {
@@ -512,11 +559,11 @@ class Simulation {
         food += map.food[idx]; gold += map.gold[idx]; iron += map.iron[idx];
       }
       nation.foodTotal = food; nation.goldTotal = gold; nation.ironTotal = iron;
-      const capacity = food * 8 + 10;
+      const capacity = food * nation.mods.foodMul * 8 + 10;
       nation.population += (capacity - nation.population) * 0.01;
       nation.population = clamp(nation.population, 0, 1e7);
       nation.economy = gold * 3 + iron * 1.5 + nation.population * 0.02;
-      const militaryCapacity = nation.economy * 0.8 * nation.info.militaryMul + iron * 2;
+      const militaryCapacity = nation.economy * 0.8 * nation.mods.militaryMul + iron * 2;
       nation.military += (militaryCapacity - nation.military) * 0.02;
       nation.military = Math.max(0, nation.military);
       if (nation.heroBoostTicks > 0) nation.heroBoostTicks--;
@@ -537,7 +584,7 @@ class Simulation {
     const top = alive.slice(0, 3)
       .map(n => `${n.name}(${((n.territorySize / landTotal) * 100).toFixed(0)}%)`)
       .join('、');
-    this.log(`【年代記 T${this.turn}】情勢: ${top}。生存国家数: ${alive.length}。`);
+    this.log(`【年代記 ${this.turn}年】情勢: ${top}。生存国家数: ${alive.length}。`);
   }
 
   checkEnd() {
@@ -553,8 +600,77 @@ class Simulation {
     if (!this.config.endless && this.turn >= this.config.maxTurns) {
       this.ended = true;
       this.winner = alive.slice().sort((x, y) => y.territorySize - x.territorySize)[0] || null;
-      this.log('規定ターン数に到達し、シミュレーションを終了した。');
+      this.log('既定の年数に到達し、シミュレーションを終了した。');
       if (this.onEnd) this.onEnd();
     }
+  }
+
+  // --- Player directives -------------------------------------------------
+  // Lightweight "nudges": the player picks a nation and a target, and the
+  // simulation biases or immediately resolves that one decision, while
+  // everything else keeps running on its own (semi-automatic, not manual
+  // unit control).
+
+  issueExpansionDirective(nationId, cellIdx) {
+    const nation = this.nationsById[nationId];
+    if (!nation || !nation.alive || cellIdx == null) return false;
+    if (!this.map.isLand(cellIdx % this.map.width, Math.floor(cellIdx / this.map.width))) return false;
+    nation.directiveTarget = { idx: cellIdx, expiresAtTurn: this.turn + 200 };
+    this.log(`${nation.name}の指導者${nation.leaderName}が新たな拡張方針を示した。`);
+    nation.recordEvent(this.turn, '拡張方針を指示');
+    return true;
+  }
+
+  issueDeclareWar(nationId, targetId) {
+    const nation = this.nationsById[nationId], target = this.nationsById[targetId];
+    if (!nation || !target || !nation.alive || !target.alive) return false;
+    if (nation.isAtWarWith(targetId)) return false;
+    nation.allies.delete(targetId);
+    target.allies.delete(nationId);
+    this.declareWar(nation, target, '指導者の決断による開戦');
+    return true;
+  }
+
+  issueProposeAlliance(nationId, targetId) {
+    const nation = this.nationsById[nationId], target = this.nationsById[targetId];
+    if (!nation || !target || !nation.alive || !target.alive) return false;
+    if (nation.isAtWarWith(targetId) || nation.allies.has(targetId)) return false;
+    const rel = nation.getRelation(targetId);
+    const chance = clamp(0.3 + rel / 150, 0.05, 0.9);
+    if (this.rng.chance(chance)) {
+      nation.allies.add(targetId);
+      target.allies.add(nationId);
+      nation.adjustRelation(targetId, 25);
+      target.adjustRelation(nationId, 25);
+      this.log(`${nation.name}の提案により、${nation.name}と${target.name}が同盟を締結した。`);
+      nation.recordEvent(this.turn, `${target.name}と同盟（指導者提案）`);
+      target.recordEvent(this.turn, `${nation.name}と同盟（指導者提案）`);
+    } else {
+      this.log(`${nation.name}の同盟提案は${target.name}に拒否された。`);
+      nation.adjustRelation(targetId, -3);
+      target.adjustRelation(nationId, -3);
+    }
+    return true;
+  }
+
+  issueSuePeace(nationId, targetId) {
+    const nation = this.nationsById[nationId], target = this.nationsById[targetId];
+    if (!nation || !target || !nation.isAtWarWith(targetId)) return false;
+    const rel = nation.getRelation(targetId);
+    const chance = clamp(0.35 + rel / 200, 0.1, 0.8);
+    if (this.rng.chance(chance)) {
+      nation.relations.delete(targetId);
+      target.relations.delete(nationId);
+      nation.warSinceTick.delete(targetId);
+      target.warSinceTick.delete(nationId);
+      nation.adjustRelation(targetId, 15);
+      target.adjustRelation(nationId, 15);
+      this.log(`${nation.name}の提案により、${nation.name}と${target.name}が休戦協定を結んだ。`);
+      nation.recordEvent(this.turn, `${target.name}と休戦（指導者提案）`);
+      target.recordEvent(this.turn, `${nation.name}と休戦（指導者提案）`);
+    } else {
+      this.log(`${nation.name}の休戦提案は${target.name}に拒否された。`);
+    }
+    return true;
   }
 }
