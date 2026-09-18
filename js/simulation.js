@@ -1,5 +1,11 @@
 // Core turn-based simulation: expansion, diplomacy/war declarations, combat,
 // naval crossings, random events, unrest/rebellion, and a running chronicle.
+//
+// Territory is owned in "states" (provinces): map.computeStates() groups the
+// grid into contiguous chunks of ~stateTargetCells cells each, and every
+// claim/conquest/rebellion below moves a whole state at once. This keeps
+// territorial change readable as a sequence of meaningful moves instead of a
+// flicker of single grid cells changing hands.
 
 const DEFAULT_CONFIG = Object.freeze({
   width: 240,
@@ -7,10 +13,17 @@ const DEFAULT_CONFIG = Object.freeze({
   nationCount: 8,
   maxTurns: 2000,
   endless: false,
+  stateTargetCells: 60,
 });
 
 const NAVAL_RANGE = 22;
 const NAVAL_THROTTLE_TICKS = 5;
+// Peaceful/combat claim probabilities are tuned for single grid cells; a
+// state bundles many cells together, so raw probabilities are scaled down
+// by this factor to keep the overall pace of territorial change (cells
+// changing hands per turn) in the same ballpark as before, while each
+// individual change is now a whole, meaningful province rather than a pixel.
+const STATE_CLAIM_SCALE = 0.16;
 
 class Simulation {
   constructor(config = {}) {
@@ -23,6 +36,7 @@ class Simulation {
       seaLevel: this.config.seaLevel,
       mountainThreshold: this.config.mountainThreshold,
       coastPasses: this.config.coastPasses,
+      stateTargetCells: this.config.stateTargetCells,
     };
     let mapWidth = this.config.width, mapHeight = this.config.height;
     if (preset) {
@@ -78,33 +92,6 @@ class Simulation {
     return capitals;
   }
 
-  // Claims land outward from a fresh capital via BFS until `targetSize`
-  // cells are held (or the reachable landmass runs out / bumps into another
-  // nation), so "established" nations start with a real foothold rather
-  // than a single pixel.
-  seedInitialTerritory(nation, targetSize) {
-    const map = this.map;
-    const visited = new Set([nation.capitalIdx]);
-    const queue = [nation.capitalIdx];
-    const claimed = [];
-    let qi = 0;
-    while (qi < queue.length && claimed.length < targetSize) {
-      const cur = queue[qi++];
-      const cx = cur % map.width, cy = Math.floor(cur / map.width);
-      for (const [nx, ny] of map.neighbors4(cx, cy)) {
-        if (!map.isLand(nx, ny)) continue;
-        const ni = map.idx(nx, ny);
-        if (visited.has(ni)) continue;
-        visited.add(ni);
-        if (map.owner[ni] !== -1) continue; // bumped into another nation's land
-        queue.push(ni);
-        claimed.push(ni);
-        if (claimed.length >= targetSize) break;
-      }
-    }
-    for (const idx of claimed) this.claimCell(idx, nation, false);
-  }
-
   placeNations(count) {
     const map = this.map;
     const manual = (this.config.manualCapitals || []).filter(c => c && c.idx != null).slice(0, count);
@@ -120,8 +107,6 @@ class Simulation {
     const politicalSystems = Object.values(POLITICAL_SYSTEM);
     const lifestyles = Object.values(LIFESTYLE);
     const established = this.config.startMode !== 'fromZero';
-    const landTotal = this.countLand();
-    const initialSize = clamp(Math.round(Math.sqrt(landTotal / capitalSpecs.length) * 1.5), 8, 60);
 
     capitalSpecs.forEach((spec, i) => {
       const idx = spec.idx;
@@ -136,14 +121,86 @@ class Simulation {
       nation.population = this.rng.float(60, 100);
       nation.military = this.rng.float(20, 40);
       nation.economy = this.rng.float(25, 45);
-      map.owner[idx] = i;
-      map.ownerSinceTick[idx] = 0;
       this.nations.push(nation);
       this.nationsById[i] = nation;
-      if (established) this.seedInitialTerritory(nation, initialSize);
+      // Every nation starts owning its whole home state (the atomic unit of
+      // territory), never a bare single cell — otherwise a state could end
+      // up partially owned, which the rest of the sim assumes never happens.
+      this.claimState(map.stateId[idx], nation, false);
       const biomeName = BIOME_INFO[map.biome[idx]].name;
       this.log(`${name}（${POLITICAL_SYSTEM_INFO[politicalSystem].label}・${LIFESTYLE_INFO[lifestyle].label}）が${biomeName}の地に建国された。指導者は${leaderName}（${PERSONALITY_INFO[personality].label}、${trait.label}）。`, 'found');
     });
+
+    // "Established" starts: no wilderness phase — the entire reachable
+    // landmass is already divided among the nations from turn 0, the same
+    // way a HOI4-style scenario starts fully partitioned. Each nation's
+    // already-owned home state is the seed of a simultaneous multi-source
+    // BFS over the state graph, so every other state joins whichever
+    // nation's wavefront reaches it first. "From zero" skips this: nations
+    // keep only their single starting state and must expand into everything
+    // else over time.
+    if (established) this.partitionAllStates();
+  }
+
+  // Bulk-claims every cell of a state at once (the atomic unit of ownership
+  // from here on), keeping per-cell bookkeeping (map.owner, territory Sets,
+  // unrest reset) and per-state bookkeeping (stateOwner, ownedStates,
+  // stateUnrest) in sync in one place.
+  claimState(stateId, nation, conquered) {
+    const map = this.map;
+    const state = map.states[stateId];
+    const oldOwnerId = map.stateOwner[stateId];
+    if (oldOwnerId !== -1 && oldOwnerId !== nation.id) {
+      const oldNation = this.nationsById[oldOwnerId];
+      if (oldNation) oldNation.ownedStates.delete(stateId);
+    }
+    map.stateOwner[stateId] = nation.id;
+    map.stateUnrest[stateId] = conquered ? 35 : 0;
+    map.stateOwnerSinceTick[stateId] = this.turn;
+    nation.ownedStates.add(stateId);
+    for (const cellIdx of state.cells) {
+      const oldCellOwner = map.owner[cellIdx];
+      if (oldCellOwner !== -1 && oldCellOwner !== nation.id) {
+        const oldNation = this.nationsById[oldCellOwner];
+        if (oldNation) oldNation.territory.delete(cellIdx);
+      }
+      map.owner[cellIdx] = nation.id;
+      nation.territory.add(cellIdx);
+      map.unrest[cellIdx] = conquered ? 35 : 0;
+      map.ownerSinceTick[cellIdx] = this.turn;
+    }
+  }
+
+  // Multi-source BFS over the state adjacency graph, seeded from every
+  // nation's already-owned home state and all enqueued together so growth
+  // happens in lockstep (a graph Voronoi diagram): each remaining state
+  // joins whichever nation's frontier reaches it first. Leaves no unclaimed
+  // land on any landmass that has at least one capital.
+  partitionAllStates() {
+    const map = this.map;
+    const owner = map.stateOwner;
+    const queue = [];
+    for (const nation of this.rng.shuffle(this.nations)) {
+      queue.push(map.stateId[nation.capitalIdx]);
+    }
+    let qi = 0;
+    while (qi < queue.length) {
+      const s = queue[qi++];
+      const o = owner[s];
+      const nation = this.nationsById[o];
+      for (const ns of map.stateNeighbors[s]) {
+        if (owner[ns] !== -1) continue;
+        owner[ns] = o;
+        map.stateOwnerSinceTick[ns] = 0;
+        nation.ownedStates.add(ns);
+        queue.push(ns);
+        for (const idx of map.states[ns].cells) {
+          map.owner[idx] = o;
+          map.ownerSinceTick[idx] = 0;
+          nation.territory.add(idx);
+        }
+      }
+    }
   }
 
   // `kind` categorizes the entry for the UI (log color-coding, and a toast
@@ -153,20 +210,6 @@ class Simulation {
     this.eventLog.push(entry);
     if (this.eventLog.length > 500) this.eventLog.shift();
     if (this.onLog) this.onLog(entry);
-  }
-
-  claimCell(cellIdx, nation, conquered) {
-    const map = this.map;
-    const oldOwner = map.owner[cellIdx];
-    if (oldOwner !== -1 && oldOwner !== nation.id) {
-      const oldNation = this.nationsById[oldOwner];
-      if (oldNation) oldNation.territory.delete(cellIdx);
-    }
-    map.owner[cellIdx] = nation.id;
-    nation.territory.add(cellIdx);
-    map.unrest[cellIdx] = conquered ? 35 : 0;
-    map.ownerSinceTick[cellIdx] = this.turn;
-    map.coastal = null; // ownership doesn't change coastlines, but be safe if biome ever does
   }
 
   getAlive() { return this.nations.filter(n => n.alive); }
@@ -186,33 +229,31 @@ class Simulation {
     const aliveNations = this.getAlive();
     if (aliveNations.length === 0) { this.checkEnd(); return; }
 
-    // --- single grid pass: gather expansion candidates & land border contacts ---
-    const expansionCandidates = new Map();
+    // --- single pass over the (much smaller, fixed) state graph: gather
+    // expansion candidates & state-border contacts, replacing an O(cells)
+    // grid scan with an O(states) one since state shapes never change. ---
+    const expansionCandidates = new Map(); // nationId -> Set(stateId)
     const borderPairs = new Map();
     const neighborMap = new Map();
-    for (let y = 0; y < map.height; y++) {
-      for (let x = 0; x < map.width; x++) {
-        const i = map.idx(x, y);
-        const owner = map.owner[i];
-        if (owner === -1) continue;
-        for (const [nx, ny] of map.neighbors4(x, y)) {
-          if (!map.isLand(nx, ny)) continue;
-          const j = map.idx(nx, ny);
-          const oOwner = map.owner[j];
-          if (oOwner === -1) {
-            if (!expansionCandidates.has(owner)) expansionCandidates.set(owner, new Set());
-            expansionCandidates.get(owner).add(j);
-          } else if (oOwner !== owner) {
-            const a = Math.min(owner, oOwner), b = Math.max(owner, oOwner);
-            const key = a + '-' + b;
-            if (!borderPairs.has(key)) borderPairs.set(key, { a, b, cellsOfAAdjB: new Set(), cellsOfBAdjA: new Set() });
-            const rec = borderPairs.get(key);
-            if (owner === a) rec.cellsOfAAdjB.add(i); else rec.cellsOfBAdjA.add(i);
-            if (!neighborMap.has(a)) neighborMap.set(a, new Set());
-            if (!neighborMap.has(b)) neighborMap.set(b, new Set());
-            neighborMap.get(a).add(b);
-            neighborMap.get(b).add(a);
-          }
+    const stateOwner = map.stateOwner;
+    for (const state of map.states) {
+      const owner = stateOwner[state.id];
+      if (owner === -1) continue;
+      for (const nsid of map.stateNeighbors[state.id]) {
+        const nOwner = stateOwner[nsid];
+        if (nOwner === -1) {
+          if (!expansionCandidates.has(owner)) expansionCandidates.set(owner, new Set());
+          expansionCandidates.get(owner).add(nsid);
+        } else if (nOwner !== owner) {
+          const a = Math.min(owner, nOwner), b = Math.max(owner, nOwner);
+          const key = a + '-' + b;
+          if (!borderPairs.has(key)) borderPairs.set(key, { a, b, statesOfAAdjB: new Set(), statesOfBAdjA: new Set() });
+          const rec = borderPairs.get(key);
+          if (owner === a) rec.statesOfAAdjB.add(state.id); else rec.statesOfBAdjA.add(state.id);
+          if (!neighborMap.has(a)) neighborMap.set(a, new Set());
+          if (!neighborMap.has(b)) neighborMap.set(b, new Set());
+          neighborMap.get(a).add(b);
+          neighborMap.get(b).add(a);
         }
       }
     }
@@ -270,36 +311,35 @@ class Simulation {
     return null;
   }
 
-  // Per-(nation, candidate-cell) claim probability, isolated from the
-  // resolution logic below so it can be reused for both uncontested cells
-  // (one bidder) and contested no-man's-land cells (two+ nations bidding on
-  // the same empty cell at once).
-  expansionBidProb(nation, ctx, cellIdx) {
+  // Per-(nation, candidate-state) claim probability, isolated from the
+  // resolution logic below so it can be reused for both uncontested states
+  // (one bidder) and contested no-man's-land states (two+ nations bidding on
+  // the same unclaimed state at once).
+  expansionBidProb(nation, ctx, stateId) {
     const map = this.map;
-    const cost = BIOME_INFO[map.biome[cellIdx]].cost;
-    let prob = clamp(0.5 * ctx.power * nation.mods.expansionMul / cost, 0, 0.9);
+    const state = map.states[stateId];
+    let prob = clamp(0.5 * ctx.power * nation.mods.expansionMul / state.avgCost, 0, 0.9) * STATE_CLAIM_SCALE;
     if (ctx.directed) {
-      prob = clamp(prob * 1.6, 0, 0.95); // player-directed expansion pushes harder
+      prob = clamp(prob * 1.6, 0, 0.6); // player-directed expansion pushes harder
     } else if (ctx.focus) {
-      // Cells that bring us closer to the rival than our capital already is
-      // get pushed harder; cells that grow away from the front are held
+      // States that bring us closer to the rival than our capital already is
+      // get pushed harder; states that grow away from the front are held
       // back, so territory visibly leans toward the conflict.
-      const cx = cellIdx % map.width, cy = Math.floor(cellIdx / map.width);
-      const cellToFocus = Math.hypot(cx - ctx.fx, cy - ctx.fy);
-      prob = cellToFocus < ctx.capToFocus
-        ? clamp(prob * ctx.focus.strength, 0, 0.95)
-        : clamp(prob * (2 - ctx.focus.strength), 0, 0.9);
+      const stateToFocus = Math.hypot(state.cx - ctx.fx, state.cy - ctx.fy);
+      prob = stateToFocus < ctx.capToFocus
+        ? clamp(prob * ctx.focus.strength, 0, 0.6)
+        : clamp(prob * (2 - ctx.focus.strength), 0, 0.5);
     }
     return prob;
   }
 
   // Growing territory used to let every bordering nation roll independently
-  // for the very same empty cell, so a contested strip between two expanding
-  // nations resolved as an interlaced, checkerboard-like mess instead of a
-  // clean front line. Cells with only one bidder still resolve with a plain
-  // probability roll as before; cells two or more nations are reaching for
-  // are resolved once, with a single weighted winner, so a front settles
-  // along a coherent line instead of flickering cell-by-cell.
+  // for the very same unclaimed state, so a contested strip between two
+  // expanding nations resolved as an interlaced, checkerboard-like mess
+  // instead of a clean front line. States with only one bidder still resolve
+  // with a plain probability roll as before; states two or more nations are
+  // reaching for are resolved once, with a single weighted winner, so a
+  // front settles along a coherent line instead of flickering state by state.
   processExpansion(aliveNations, expansionCandidates) {
     const map = this.map;
     for (const nation of aliveNations) {
@@ -308,11 +348,11 @@ class Simulation {
       }
     }
 
-    const cellBidders = new Map(); // cellIdx -> [nationId, ...]
+    const stateBidders = new Map(); // stateId -> [nationId, ...]
     for (const [nationId, candSet] of expansionCandidates) {
-      for (const cellIdx of candSet) {
-        if (!cellBidders.has(cellIdx)) cellBidders.set(cellIdx, []);
-        cellBidders.get(cellIdx).push(nationId);
+      for (const stateId of candSet) {
+        if (!stateBidders.has(stateId)) stateBidders.set(stateId, []);
+        stateBidders.get(stateId).push(nationId);
       }
     }
 
@@ -328,21 +368,21 @@ class Simulation {
         directed, focus, fx, fy,
         capToFocus: focus ? Math.hypot(capX - fx, capY - fy) : 0,
         claims: 0,
-        maxClaims: directed ? 5 : 3,
+        maxClaims: directed ? 2 : 1,
       });
     }
 
-    // Contested cells first, resolved one at a time in random order.
-    const contestedCells = this.rng.shuffle(
-      [...cellBidders.entries()].filter(([, ids]) => ids.length > 1).map(([idx]) => idx)
+    // Contested states first, resolved one at a time in random order.
+    const contestedStates = this.rng.shuffle(
+      [...stateBidders.entries()].filter(([, ids]) => ids.length > 1).map(([sid]) => sid)
     );
-    for (const cellIdx of contestedCells) {
+    for (const stateId of contestedStates) {
       const bids = [];
-      for (const nationId of cellBidders.get(cellIdx)) {
+      for (const nationId of stateBidders.get(stateId)) {
         const ctx = nationCtx.get(nationId);
         if (!ctx || ctx.claims >= ctx.maxClaims) continue;
         const nation = this.nationsById[nationId];
-        const prob = this.expansionBidProb(nation, ctx, cellIdx);
+        const prob = this.expansionBidProb(nation, ctx, stateId);
         if (prob > 0) bids.push({ nation, ctx, prob });
       }
       if (bids.length === 0) continue;
@@ -355,33 +395,32 @@ class Simulation {
         r -= b.prob;
         if (r <= 0) { winner = b; break; }
       }
-      this.claimCell(cellIdx, winner.nation, false);
+      this.claimState(stateId, winner.nation, false);
       winner.ctx.claims++;
     }
 
-    // Uncontested cells: same plain roll as before, per nation, with the
+    // Uncontested states: same plain roll as before, per nation, with the
     // player-directed target (nearest-first) or war-focus shuffle preserved.
     for (const nation of aliveNations) {
       const ctx = nationCtx.get(nation.id);
       if (!ctx || ctx.claims >= ctx.maxClaims) continue;
       const candidates = expansionCandidates.get(nation.id);
-      let candArr = [...candidates].filter((idx) => cellBidders.get(idx).length === 1);
+      let candArr = [...candidates].filter((sid) => stateBidders.get(sid).length === 1);
       if (candArr.length === 0) continue;
       if (ctx.directed) {
         const tx = ctx.directed.idx % map.width, ty = Math.floor(ctx.directed.idx / map.width);
-        candArr.sort((c1, c2) => {
-          const x1 = c1 % map.width, y1 = Math.floor(c1 / map.width);
-          const x2 = c2 % map.width, y2 = Math.floor(c2 / map.width);
-          return Math.hypot(x1 - tx, y1 - ty) - Math.hypot(x2 - tx, y2 - ty);
+        candArr.sort((s1, s2) => {
+          const st1 = map.states[s1], st2 = map.states[s2];
+          return Math.hypot(st1.cx - tx, st1.cy - ty) - Math.hypot(st2.cx - tx, st2.cy - ty);
         });
       } else {
         candArr = this.rng.shuffle(candArr);
       }
-      for (const cellIdx of candArr) {
+      for (const stateId of candArr) {
         if (ctx.claims >= ctx.maxClaims) break;
-        const prob = this.expansionBidProb(nation, ctx, cellIdx);
+        const prob = this.expansionBidProb(nation, ctx, stateId);
         if (this.rng.chance(prob)) {
-          this.claimCell(cellIdx, nation, false);
+          this.claimState(stateId, nation, false);
           ctx.claims++;
         }
       }
@@ -428,12 +467,13 @@ class Simulation {
 
   // Overseas colonization of empty coastland, and amphibious invasion of
   // enemy coastland when already at war with them. Throttled since it walks
-  // BFS fans out from several coastal cells per nation.
+  // BFS fans out from several coastal cells per nation. Targets are resolved
+  // to whole states (a naval landing claims the full province it lands in).
   processNaval(aliveNations) {
     if (this.turn % NAVAL_THROTTLE_TICKS !== 0) return;
     const map = this.map;
     this._navalContacts = new Map();
-    const MAX_COLONIZE = 2, MAX_INVADE = 2;
+    const MAX_COLONIZE = 1, MAX_INVADE = 1;
     for (const nation of aliveNations) {
       if (nation.territorySize === 0) continue;
       const coastalCells = [...nation.territory].filter(idx => map.isCoastal(idx));
@@ -441,27 +481,31 @@ class Simulation {
       const origins = this.rng.shuffle(coastalCells).slice(0, 3);
       let colonized = 0, invaded = 0;
       const invadedTargets = new Map(); // otherId -> count
+      const seenStates = new Set();
       for (const origin of origins) {
-        const targets = this.rng.shuffle(this.navalTargetsFrom(origin, NAVAL_RANGE)).slice(0, 6);
-        for (const targetIdx of targets) {
-          const owner = map.owner[targetIdx];
+        const targetCells = this.rng.shuffle(this.navalTargetsFrom(origin, NAVAL_RANGE));
+        for (const targetIdx of targetCells) {
+          const targetStateId = map.stateId[targetIdx];
+          if (seenStates.has(targetStateId)) continue;
+          seenStates.add(targetStateId);
+          const owner = map.stateOwner[targetStateId];
           if (owner === -1) {
             if (colonized >= MAX_COLONIZE) continue;
             const power = (nation.population * 0.4 + nation.economy * 0.6) / 120;
-            const prob = clamp(0.1 * power * nation.mods.expansionMul * nation.mods.navalMul, 0, 0.3);
+            const prob = clamp(0.06 * power * nation.mods.expansionMul * nation.mods.navalMul, 0, 0.22);
             if (this.rng.chance(prob)) {
-              this.claimCell(targetIdx, nation, false);
+              this.claimState(targetStateId, nation, false);
               colonized++;
             }
           } else if (owner !== nation.id) {
             const other = this.nationsById[owner];
             if (!other || !other.alive) continue;
             this.registerNavalContact(nation.id, owner);
-            if (invaded >= MAX_INVADE || !nation.isAtWarWith(owner) || !this.rng.chance(0.4)) continue;
+            if (invaded >= MAX_INVADE || !nation.isAtWarWith(owner) || !this.rng.chance(0.1)) continue;
             const strA = nation.strength() * (1 + this.rng.float(-0.2, 0.2));
             const strB = other.strength() * (1 + this.rng.float(-0.2, 0.2));
             if (strA > strB) {
-              this.claimCell(targetIdx, nation, true);
+              this.claimState(targetStateId, nation, true);
               nation.military = Math.max(0, nation.military - nation.military * 0.08);
               other.military = Math.max(0, other.military - other.military * 0.05);
               invaded++;
@@ -552,7 +596,7 @@ class Simulation {
   }
 
   // Resolves ongoing fights only between nations currently at war with each
-  // other, and only where they share a land border this tick.
+  // other, and only where they share a state border this tick.
   processCombat(aliveNations, borderPairs) {
     const processed = new Set();
     for (const nation of aliveNations) {
@@ -566,13 +610,16 @@ class Simulation {
         processed.add(key);
         const rec = borderPairs.get(key);
         if (!rec) continue; // no shared land front this tick (naval combat handled in processNaval)
-        if (!this.rng.chance(0.35)) continue; // not every front is active every tick
+        // A battle now hands over a whole province rather than a few cells,
+        // so fronts flare up far less often than every few ticks — wars grind
+        // on for a meaningful stretch instead of resolving in a few dozen turns.
+        if (!this.rng.chance(0.06)) continue;
         this.resolveLandBattle(rec);
       }
     }
   }
 
-  resolveLandBattle({ a, b, cellsOfAAdjB, cellsOfBAdjA }) {
+  resolveLandBattle({ a, b, statesOfAAdjB, statesOfBAdjA }) {
     const nationA = this.nationsById[a], nationB = this.nationsById[b];
     const strA = nationA.strength() * (1 + this.rng.float(-0.15, 0.15));
     const strB = nationB.strength() * (1 + this.rng.float(-0.15, 0.15));
@@ -580,13 +627,16 @@ class Simulation {
     if (total <= 0.001) return;
     const winner = strA > strB ? nationA : nationB;
     const loser = winner === nationA ? nationB : nationA;
-    const loserFrontier = loser.id === b ? [...cellsOfBAdjA] : [...cellsOfAAdjB];
+    const loserFrontier = loser.id === b ? [...statesOfBAdjA] : [...statesOfAAdjB];
     if (loserFrontier.length === 0) return;
 
+    // Capturing a whole state is already a substantial prize, so a single
+    // battle only ever takes one (or, in a decisive rout, two) provinces —
+    // territory should not be easy to take just because a front is active.
     const diff = Math.abs(strA - strB) / total;
-    const captureCount = clamp(Math.round(1 + diff * 4), 1, 5);
+    const captureCount = clamp(Math.round(diff * 2), 1, 2);
     const captured = this.rng.shuffle(loserFrontier).slice(0, Math.min(captureCount, loserFrontier.length));
-    for (const idx of captured) this.claimCell(idx, winner, true);
+    for (const stateId of captured) this.claimState(stateId, winner, true);
 
     const consumption = 0.12;
     winner.military = Math.max(0, winner.military - winner.military * consumption * 0.5);
@@ -699,14 +749,14 @@ class Simulation {
       }
 
       // A legitimacy crisis: military and economy dip, and a handful of
-      // territories flare up in unrest, flavored to match how the nation
+      // owned states flare up in unrest, flavored to match how the nation
       // is actually governed.
       if (this.rng.chance(0.0016)) {
         nation.military *= 0.75;
         nation.economy *= 0.9;
-        const territoryArr = [...nation.territory];
-        for (const idx of this.rng.shuffle(territoryArr).slice(0, 8)) {
-          this.map.unrest[idx] = clamp(this.map.unrest[idx] + 20, 0, 100);
+        const stateArr = [...nation.ownedStates];
+        for (const stateId of this.rng.shuffle(stateArr).slice(0, 4)) {
+          this.map.stateUnrest[stateId] = clamp(this.map.stateUnrest[stateId] + 20, 0, 100);
         }
         this.log(`${nation.name}で${this.successionFlavor(nation)}、国内が動揺した。`, 'crisis');
         nation.recordEvent(this.turn, '国内の継承・政争危機');
@@ -747,16 +797,17 @@ class Simulation {
       }
 
       // Age-of-exploration flavor for seafaring peoples: an expedition finds
-      // and settles new coastland outright, on top of the regular slow
+      // and settles a new coastal state outright, on top of the regular slow
       // naval colonization roll.
       if ((nation.lifestyle === LIFESTYLE.MARITIME || nation.lifestyle === LIFESTYLE.FISHING) && this.rng.chance(0.0015)) {
         const coastalCells = [...nation.territory].filter((idx) => this.map.isCoastal(idx));
         if (coastalCells.length) {
           const origin = this.rng.choice(coastalCells);
-          const targets = this.navalTargetsFrom(origin, NAVAL_RANGE).filter((idx) => this.map.owner[idx] === -1);
+          const targets = this.navalTargetsFrom(origin, NAVAL_RANGE)
+            .filter((idx) => this.map.stateOwner[this.map.stateId[idx]] === -1);
           if (targets.length) {
-            const claimed = this.rng.choice(targets);
-            this.claimCell(claimed, nation, false);
+            const claimedIdx = this.rng.choice(targets);
+            this.claimState(this.map.stateId[claimedIdx], nation, false);
             this.log(`${nation.name}の船団が新たな海岸を発見し、入植地を築いた。`, 'exploration');
             nation.recordEvent(this.turn, '新天地の発見と入植');
           }
@@ -766,8 +817,8 @@ class Simulation {
       // Good governance: an active, deliberate calming of unrest, the
       // counterweight to the slow creep modeled in processUnrest.
       if (this.rng.chance(0.0018)) {
-        for (const idx of nation.territory) {
-          this.map.unrest[idx] = Math.max(0, this.map.unrest[idx] - 30);
+        for (const stateId of nation.ownedStates) {
+          this.map.stateUnrest[stateId] = Math.max(0, this.map.stateUnrest[stateId] - 30);
         }
         this.log(`${nation.name}で善政が敷かれ、各地の民心が落ち着きを取り戻した。`, 'governance');
         nation.recordEvent(this.turn, '善政による民心安定');
@@ -809,14 +860,13 @@ class Simulation {
     }
   }
 
-  // A cell fully boxed in by the same nation's own territory on every side
-  // (no coastline, no foreign or unclaimed neighbor). Letting these rebel at
-  // the normal rate punches random single-cell holes deep inside otherwise
-  // solid territory, which reads as unrealistic salt-and-pepper noise rather
-  // than a believable secession.
-  isInteriorCell(nation, x, y, map) {
-    for (const [nx, ny] of map.neighbors4(x, y)) {
-      if (map.owner[map.idx(nx, ny)] !== nation.id) return false;
+  // A state fully boxed in by the same nation's own territory on every side
+  // (no coastline, no foreign or unclaimed neighbor state). Letting these
+  // rebel at the normal rate punches holes deep inside otherwise solid
+  // territory, which reads as an unrealistic secession out of nowhere.
+  isInteriorState(nation, stateId, map) {
+    for (const nsid of map.stateNeighbors[stateId]) {
+      if (map.stateOwner[nsid] !== nation.id) return false;
     }
     return true;
   }
@@ -824,20 +874,22 @@ class Simulation {
   processUnrest(aliveNations) {
     const map = this.map;
     const mapScale = Math.max(map.width, map.height) * 0.5;
+    const capitalStateId = (nation) => map.stateId[nation.capitalIdx];
     for (const nation of aliveNations) {
       if (nation.territorySize === 0) continue;
       const baseGrowth = 0.14 * nation.mods.unrestMul;
       const capX = nation.capitalIdx % map.width, capY = Math.floor(nation.capitalIdx / map.width);
+      const capStateId = capitalStateId(nation);
       const toRebel = [];
-      for (const idx of nation.territory) {
-        if (idx === nation.capitalIdx) {
-          map.unrest[idx] = Math.max(0, map.unrest[idx] - 0.5);
+      for (const stateId of nation.ownedStates) {
+        if (stateId === capStateId) {
+          map.stateUnrest[stateId] = Math.max(0, map.stateUnrest[stateId] - 0.5);
           continue;
         }
-        const age = this.turn - map.ownerSinceTick[idx];
-        const x = idx % map.width, y = Math.floor(idx / map.width);
-        const distFactor = clamp(Math.hypot(x - capX, y - capY) / mapScale, 0.25, 1.6);
-        const u = map.unrest[idx];
+        const state = map.states[stateId];
+        const age = this.turn - map.stateOwnerSinceTick[stateId];
+        const distFactor = clamp(Math.hypot(state.cx - capX, state.cy - capY) / mapScale, 0.25, 1.6);
+        const u = map.stateUnrest[stateId];
         let delta;
         if (age < 60) {
           delta = baseGrowth * 1.6 * distFactor; // freshly annexed land resents new rule
@@ -846,16 +898,21 @@ class Simulation {
         } else {
           delta = baseGrowth * 0.5 * distFactor; // already resentful land keeps simmering
         }
-        map.unrest[idx] = clamp(u + delta, 0, 100);
-        if (map.unrest[idx] > 75) {
-          const interior = this.isInteriorCell(nation, x, y, map);
-          if (this.rng.chance(interior ? 0.0007 : 0.015)) toRebel.push(idx);
+        map.stateUnrest[stateId] = clamp(u + delta, 0, 100);
+        if (map.stateUnrest[stateId] > 75) {
+          const interior = this.isInteriorState(nation, stateId, map);
+          if (this.rng.chance(interior ? 0.0004 : 0.006)) toRebel.push(stateId);
         }
       }
-      for (const idx of toRebel) {
-        nation.territory.delete(idx);
-        map.owner[idx] = -1;
-        map.unrest[idx] = 0;
+      for (const stateId of toRebel) {
+        nation.ownedStates.delete(stateId);
+        map.stateOwner[stateId] = -1;
+        map.stateUnrest[stateId] = 0;
+        for (const idx of map.states[stateId].cells) {
+          nation.territory.delete(idx);
+          map.owner[idx] = -1;
+          map.unrest[idx] = 0;
+        }
       }
       if (toRebel.length > 0) {
         this.log(`${nation.name}の統治下で反乱が発生し、${toRebel.length}地域が独立した。`, 'rebellion');

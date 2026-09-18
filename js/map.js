@@ -45,9 +45,21 @@ class WorldMap {
     this.seaLevel = options.seaLevel != null ? options.seaLevel : 0.35;
     this.mountainThreshold = options.mountainThreshold != null ? options.mountainThreshold : 0.72;
     this.coastPasses = options.coastPasses != null ? options.coastPasses : 2;
+    // Average cell count per "state" (province): the atomic unit of
+    // ownership/expansion, several grid cells grouped together so territory
+    // changes hands in visible chunks instead of flickering cell by cell.
+    this.stateTargetCells = options.stateTargetCells != null ? options.stateTargetCells : 60;
     // When set, land/sea comes from this real-world coastline mask (1=land)
     // instead of noise, so preset maps (Europe/Asia) stay recognizable.
     this.presetMask = options.presetMask || null;
+    // Per-cell state membership + per-state data, computed once after
+    // biome/coastline generation finishes (see computeStates below).
+    this.stateId = null; // Int32Array, land cell -> state id (-1 = ocean)
+    this.states = null; // [{id, cells:[cellIdx,...], size, coastal, cx, cy, avgCost}]
+    this.stateNeighbors = null; // Set<stateId>[], indexed by state id
+    this.stateOwner = null; // Int16Array, indexed by state id (-1 = unclaimed)
+    this.stateUnrest = null; // Float32Array, indexed by state id
+    this.stateOwnerSinceTick = null; // Int32Array, indexed by state id
     this.generate();
   }
 
@@ -105,6 +117,8 @@ class WorldMap {
     // Real coastlines are already clean; only noise-generated ones need the
     // cellular-automaton smoothing pass.
     if (!usingPreset) this.smoothCoastline(this.coastPasses);
+
+    this.computeStates(this.stateTargetCells);
   }
 
   // `landAlready` is set when land/sea is decided externally (a preset
@@ -244,4 +258,114 @@ class WorldMap {
     if (!this.landmassId) this.computeLandmass();
     return this.landmassId[idx];
   }
+
+  // Groups land cells into "states" (provinces): the atomic unit of
+  // ownership from here on, so a nation's territory changes in visible,
+  // meaningful chunks rather than one grid cell at a time. Seeds are spread
+  // across land with roughly even spacing (relaxed until the target count is
+  // reached), then every land cell is assigned to its nearest seed via a
+  // single multi-source BFS (all seeds enqueued together, so cells are
+  // claimed by whichever seed's wavefront reaches them first — a graph
+  // Voronoi diagram). Any land left unreached (a tiny islet with no seed of
+  // its own, usually because it's disconnected from every seeded landmass)
+  // becomes a singleton state of its own, so every land cell always ends up
+  // in exactly one state.
+  computeStates(targetCells) {
+    const { width, height } = this;
+    const n = width * height;
+    const landIdxs = [];
+    for (let i = 0; i < n; i++) if (BIOME_INFO[this.biome[i]].passable) landIdxs.push(i);
+    if (landIdxs.length === 0) {
+      this.stateId = new Int32Array(n).fill(-1);
+      this.states = [];
+      this.stateNeighbors = [];
+      this.stateOwner = new Int16Array(0);
+      this.stateUnrest = new Float32Array(0);
+      this.stateOwnerSinceTick = new Int32Array(0);
+      return;
+    }
+
+    const numStates = Math.max(1, Math.round(landIdxs.length / targetCells));
+    const rng = new RNG(((this.seed ^ 0x5bd1e995) >>> 0) || 1);
+    const shuffled = rng.shuffle(landIdxs);
+    const seedSet = new Set();
+    const seeds = [];
+    let minDist = Math.sqrt(targetCells / Math.PI) * 1.6;
+    while (seeds.length < numStates && minDist >= 1) {
+      for (const idx of shuffled) {
+        if (seeds.length >= numStates) break;
+        if (seedSet.has(idx)) continue;
+        const x = idx % width, y = Math.floor(idx / width);
+        let ok = true;
+        for (const s of seeds) {
+          const sx = s % width, sy = Math.floor(s / width);
+          if (Math.hypot(x - sx, y - sy) < minDist) { ok = false; break; }
+        }
+        if (ok) { seeds.push(idx); seedSet.add(idx); }
+      }
+      minDist *= 0.7;
+    }
+    for (const idx of shuffled) {
+      if (seeds.length >= numStates) break;
+      if (!seedSet.has(idx)) { seeds.push(idx); seedSet.add(idx); }
+    }
+
+    const stateId = new Int32Array(n).fill(-1);
+    const queue = [];
+    seeds.forEach((s, id) => { stateId[s] = id; queue.push(s); });
+    let qi = 0;
+    while (qi < queue.length) {
+      const cur = queue[qi++];
+      const cx = cur % width, cy = Math.floor(cur / width);
+      const sid = stateId[cur];
+      for (const [nx, ny] of this.neighbors4(cx, cy)) {
+        const ni = this.idx(nx, ny);
+        if (stateId[ni] !== -1 || !BIOME_INFO[this.biome[ni]].passable) continue;
+        stateId[ni] = sid;
+        queue.push(ni);
+      }
+    }
+    let nextId = seeds.length;
+    for (const idx of landIdxs) {
+      if (stateId[idx] === -1) stateId[idx] = nextId++;
+    }
+
+    const states = [];
+    for (let i = 0; i < nextId; i++) states.push({ id: i, cells: [], size: 0, coastal: false, cx: 0, cy: 0, avgCost: 0 });
+    for (const idx of landIdxs) states[stateId[idx]].cells.push(idx);
+    for (const s of states) {
+      let sx = 0, sy = 0, costSum = 0;
+      for (const idx of s.cells) {
+        const x = idx % width, y = Math.floor(idx / width);
+        sx += x; sy += y;
+        costSum += BIOME_INFO[this.biome[idx]].cost;
+        if (!s.coastal && this.isCoastal(idx)) s.coastal = true;
+      }
+      s.size = s.cells.length;
+      s.cx = sx / s.size;
+      s.cy = sy / s.size;
+      s.avgCost = costSum / s.size;
+    }
+
+    const stateNeighbors = states.map(() => new Set());
+    for (const idx of landIdxs) {
+      const x = idx % width, y = Math.floor(idx / width);
+      const sid = stateId[idx];
+      for (const [nx, ny] of this.neighbors4(x, y)) {
+        const ni = this.idx(nx, ny);
+        if (!BIOME_INFO[this.biome[ni]].passable) continue;
+        const nsid = stateId[ni];
+        if (nsid !== sid) { stateNeighbors[sid].add(nsid); stateNeighbors[nsid].add(sid); }
+      }
+    }
+
+    this.stateId = stateId;
+    this.states = states;
+    this.stateNeighbors = stateNeighbors;
+    this.stateOwner = new Int16Array(states.length).fill(-1);
+    this.stateUnrest = new Float32Array(states.length);
+    this.stateOwnerSinceTick = new Int32Array(states.length);
+  }
+
+  getState(idx) { return this.states[this.stateId[idx]]; }
 }

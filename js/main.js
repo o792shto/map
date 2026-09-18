@@ -308,6 +308,7 @@
   }
 
   function updateMapHint() {
+    if (renderer) renderer.pendingDirective = pendingDirective;
     if (!pendingDirective) {
       mapHint.textContent = DEFAULT_MAP_HINT;
       mapHint.classList.remove('active-directive');
@@ -315,9 +316,9 @@
     }
     const labels = {
       expand: '拡張したい地点を地図上でクリック（Escでキャンセル）',
-      war: '宣戦布告する相手の国家を地図か一覧でクリック（Escでキャンセル）',
-      ally: '同盟を提案する相手の国家を地図か一覧でクリック（Escでキャンセル）',
-      peace: '休戦を提案する相手の国家を地図か一覧でクリック（Escでキャンセル）',
+      war: '宣戦布告する相手の国家を地図上の「戦」マークか一覧でクリック（Escでキャンセル）',
+      ally: '同盟を提案する相手の国家を地図上の🤝マークか一覧でクリック（Escでキャンセル）',
+      peace: '休戦を提案する相手の国家を地図上の「和」マークか一覧でクリック（Escでキャンセル）',
     };
     mapHint.textContent = labels[pendingDirective.type];
     mapHint.classList.add('active-directive');

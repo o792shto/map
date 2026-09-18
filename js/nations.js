@@ -144,6 +144,7 @@ class Nation {
     this.trait = trait;
     this.capitalIdx = capitalIdx;
     this.territory = new Set([capitalIdx]);
+    this.ownedStates = new Set(); // stateIds this nation currently holds
     this.population = 0;
     this.military = 0;
     this.economy = 0;

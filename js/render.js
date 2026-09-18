@@ -143,6 +143,7 @@ class Renderer {
     this.showUnrest = true;
     this.showLabels = true;
     this.selectedNationId = null;
+    this.pendingDirective = null; // {type: 'war'|'ally'|'peace'|'expand', sourceId} — drives target-candidate markers
     this.onCellClick = null;
     this._bufCanvas = null;
     this._bufCtx = null;
@@ -438,6 +439,73 @@ class Renderer {
     }
   }
 
+  // A small always-on badge near each intact capital showing relative
+  // military strength, so the balance of power reads at a glance instead of
+  // requiring a click into the nation list.
+  drawMilitaryBadges() {
+    const { ctx, sim, canvas } = this;
+    if (this.camera.zoom < 0.5) return; // too small/cluttered to read when zoomed far out
+    const map = sim.map;
+    const placed = [];
+    for (const nation of sim.nations) {
+      if (!nation.alive || map.owner[nation.capitalIdx] !== nation.id) continue;
+      const cx = nation.capitalIdx % map.width, cy = Math.floor(nation.capitalIdx / map.width);
+      const sx = (cx + 0.5) * this.cellPx * this.camera.zoom + this.camera.x;
+      const sy = (cy + 0.5) * this.cellPx * this.camera.zoom + this.camera.y;
+      if (sx < -40 || sy < -30 || sx > canvas.width + 40 || sy > canvas.height + 30) continue;
+      const text = `軍${formatNumber(nation.military)}`;
+      ctx.font = '600 10.5px "EB Garamond", serif';
+      const textWidth = ctx.measureText(text).width;
+      const badgeY = sy + this.cellPx * this.camera.zoom * 0.65 + 9;
+      const box = { x0: sx - textWidth / 2 - 4, x1: sx + textWidth / 2 + 4, y0: badgeY - 7, y1: badgeY + 7 };
+      if (placed.some(p => !(box.x1 < p.x0 || box.x0 > p.x1 || box.y1 < p.y0 || box.y0 > p.y1))) continue;
+      placed.push(box);
+      ctx.fillStyle = 'rgba(36,26,16,0.72)';
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(box.x0, box.y0, box.x1 - box.x0, box.y1 - box.y0, 4);
+      else ctx.rect(box.x0, box.y0, box.x1 - box.x0, box.y1 - box.y0);
+      ctx.fill();
+      ctx.fillStyle = '#f0d98c';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(text, sx, badgeY);
+    }
+  }
+
+  // While the player is choosing a target for a war/alliance/peace directive,
+  // mark every eligible target nation's capital with an icon matching the
+  // action, so the choice is visible on the map itself instead of only in
+  // the bottom-left hint text.
+  drawDirectiveMarkers() {
+    const { ctx, sim, canvas } = this;
+    const pd = this.pendingDirective;
+    if (!pd || (pd.type !== 'war' && pd.type !== 'ally' && pd.type !== 'peace')) return;
+    const map = sim.map;
+    const icon = pd.type === 'war' ? '戦' : pd.type === 'ally' ? '\u{1F91D}' : '和';
+    const bg = pd.type === 'war' ? 'rgba(122,46,29,0.92)' : 'rgba(63,107,58,0.92)';
+    for (const nation of sim.nations) {
+      if (!nation.alive || nation.id === pd.sourceId) continue;
+      if (map.owner[nation.capitalIdx] !== nation.id) continue;
+      const cx = nation.capitalIdx % map.width, cy = Math.floor(nation.capitalIdx / map.width);
+      const sx = (cx + 0.5) * this.cellPx * this.camera.zoom + this.camera.x;
+      const sy = (cy + 0.5) * this.cellPx * this.camera.zoom + this.camera.y;
+      if (sx < -20 || sy < -20 || sx > canvas.width + 20 || sy > canvas.height + 20) continue;
+      const markerY = sy - 22;
+      ctx.beginPath();
+      ctx.arc(sx, markerY, 11, 0, Math.PI * 2);
+      ctx.fillStyle = bg;
+      ctx.fill();
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = 'rgba(244,232,199,0.9)';
+      ctx.stroke();
+      ctx.font = '13px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#f5e9c8';
+      ctx.fillText(icon, sx, markerY + 1);
+    }
+  }
+
   render() {
     const { ctx, canvas, sim } = this;
     const map = sim.map;
@@ -497,6 +565,8 @@ class Renderer {
     ctx.restore();
 
     if (this.showLabels) this.drawLabels();
+    this.drawMilitaryBadges();
+    this.drawDirectiveMarkers();
 
     ctx.save();
     ctx.globalAlpha = 0.55;
