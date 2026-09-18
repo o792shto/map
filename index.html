@@ -32,8 +32,35 @@
   <main class="layout">
     <div class="map-area">
       <canvas id="mapCanvas"></canvas>
-      <div class="map-hint">ホイールでズーム / ドラッグで移動</div>
+      <div class="map-hint">ホイールでズーム / ドラッグで移動 / クリックで国家を選択</div>
       <div class="turn-badge" id="turnBadge">Turn 0</div>
+
+      <div id="nationDetail" class="nation-detail hidden">
+        <div class="nation-detail-header">
+          <span class="nation-swatch large" id="ndSwatch"></span>
+          <input id="ndNameInput" class="nation-name-input" maxlength="24" spellcheck="false">
+          <button id="ndCloseBtn" class="icon-btn" title="閉じる">×</button>
+        </div>
+        <div class="nation-detail-body">
+          <div class="nd-row"><span class="nd-label">指導者</span><span id="ndLeader"></span></div>
+          <div class="nd-row"><span class="nd-label">性格</span><span id="ndPersonality"></span></div>
+          <div class="nd-row"><span class="nd-label">建国</span><span id="ndFounded"></span></div>
+          <div class="nd-stats">
+            <div><span class="nd-label">人口</span><b id="ndPop"></b></div>
+            <div><span class="nd-label">軍事力</span><b id="ndMil"></b></div>
+            <div><span class="nd-label">経済力</span><b id="ndEco"></b></div>
+            <div><span class="nd-label">領土</span><b id="ndTerritory"></b></div>
+          </div>
+          <div class="nd-section">
+            <h3>外交関係</h3>
+            <div id="ndRelations" class="nd-relations"></div>
+          </div>
+          <div class="nd-section">
+            <h3>年代記</h3>
+            <div id="ndHistory" class="nd-history"></div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <aside class="sidebar">

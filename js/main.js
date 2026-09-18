@@ -19,12 +19,27 @@
   const endContinueBtn = document.getElementById('endContinueBtn');
   const endRegenerateBtn = document.getElementById('endRegenerateBtn');
 
+  const nationDetail = document.getElementById('nationDetail');
+  const ndSwatch = document.getElementById('ndSwatch');
+  const ndNameInput = document.getElementById('ndNameInput');
+  const ndCloseBtn = document.getElementById('ndCloseBtn');
+  const ndLeader = document.getElementById('ndLeader');
+  const ndPersonality = document.getElementById('ndPersonality');
+  const ndFounded = document.getElementById('ndFounded');
+  const ndPop = document.getElementById('ndPop');
+  const ndMil = document.getElementById('ndMil');
+  const ndEco = document.getElementById('ndEco');
+  const ndTerritory = document.getElementById('ndTerritory');
+  const ndRelations = document.getElementById('ndRelations');
+  const ndHistory = document.getElementById('ndHistory');
+
   let sim = null;
   let renderer = null;
   let chart = null;
   let paused = false;
   let tickAccumulator = 0;
   let lastFrameTime = null;
+  let selectedNationId = null;
 
   function resizeMapCanvas() {
     const rect = mapCanvas.getBoundingClientRect();
@@ -45,16 +60,34 @@
     sim.onEnd = () => showEndOverlay();
     if (!renderer) {
       renderer = new Renderer(mapCanvas, sim);
+      renderer.onCellClick = onMapClick;
     } else {
       renderer.setSim(sim);
     }
     if (!chart) chart = new ChartRenderer(chartCanvas);
     logListEl.innerHTML = '';
+    // placeNations() logs founding events during construction, before onLog
+    // was wired up above, so replay whatever is already in the log.
+    for (const entry of sim.eventLog) appendLogEntry(entry);
     endOverlay.classList.add('hidden');
     tickAccumulator = 0;
+    selectNation(null);
     updateTurnBadge();
     updateNationList();
     chart.render(sim);
+  }
+
+  function onMapClick(cellIdx) {
+    if (cellIdx == null) { selectNation(null); return; }
+    const owner = sim.map.owner[cellIdx];
+    selectNation(owner === -1 ? null : owner);
+  }
+
+  function selectNation(nationId) {
+    selectedNationId = nationId;
+    if (renderer) renderer.selectedNationId = nationId;
+    updateNationDetail();
+    updateNationList();
   }
 
   function appendLogEntry(entry) {
@@ -74,18 +107,84 @@
     turnBadge.textContent = `Turn ${sim.turn}` + (sim.config.endless ? ' (endless)' : ` / ${sim.config.maxTurns}`);
   }
 
+  function warCount(nation) {
+    let c = 0;
+    for (const state of nation.relations.values()) if (state === 'war') c++;
+    return c;
+  }
+
   function updateNationList() {
     const landTotal = countLandCells(sim.map);
     const rows = sim.nations.slice().sort((a, b) => b.territorySize - a.territorySize);
     nationListEl.innerHTML = rows.map((n) => {
       const pct = landTotal > 0 ? ((n.territorySize / landTotal) * 100).toFixed(1) : '0.0';
-      return `<div class="nation-row ${n.alive ? '' : 'dead'}">
+      const wars = warCount(n);
+      const allies = n.allies.size;
+      const badges = (n.alive ? (
+        (wars > 0 ? `<span class="badge-war">交戦×${wars}</span>` : '') +
+        (allies > 0 ? `<span class="badge-ally">同盟×${allies}</span>` : '')
+      ) : '');
+      return `<div class="nation-row ${n.alive ? '' : 'dead'} ${n.id === selectedNationId ? 'selected' : ''}" data-id="${n.id}">
         <span class="nation-swatch" style="background:${n.color}"></span>
-        <span class="nation-name">${escapeHtml(n.name)}</span>
-        <span class="nation-meta">${PERSONALITY_INFO[n.personality].label} ・ ${n.alive ? pct + '%' : '滅亡'}</span>
+        <span class="nation-name ${n.userNamed ? 'user-named' : ''}">${escapeHtml(n.name)}</span>
+        <span class="nation-meta">${PERSONALITY_INFO[n.personality].label} ・ ${n.alive ? pct + '%' : '滅亡'}${badges}</span>
       </div>`;
     }).join('');
+    nationListEl.querySelectorAll('.nation-row').forEach((row) => {
+      row.addEventListener('click', () => selectNation(parseInt(row.dataset.id, 10)));
+    });
   }
+
+  function updateNationDetail() {
+    if (selectedNationId == null || !sim.nationsById[selectedNationId]) {
+      nationDetail.classList.add('hidden');
+      return;
+    }
+    const n = sim.nationsById[selectedNationId];
+    nationDetail.classList.remove('hidden');
+    ndSwatch.style.background = n.color;
+    if (document.activeElement !== ndNameInput) ndNameInput.value = n.name;
+    ndLeader.textContent = n.leaderName || '不明';
+    ndPersonality.textContent = PERSONALITY_INFO[n.personality].label;
+    ndFounded.textContent = `T${n.foundedAtTick}`;
+    ndPop.textContent = formatNumber(n.population);
+    ndMil.textContent = formatNumber(n.military);
+    ndEco.textContent = formatNumber(n.economy);
+    const landTotal = countLandCells(sim.map);
+    const pct = landTotal > 0 ? ((n.territorySize / landTotal) * 100).toFixed(1) : '0.0';
+    ndTerritory.textContent = n.alive ? `${n.territorySize}マス (${pct}%)` : `滅亡 (T${n.diedAtTick})`;
+
+    const chips = [];
+    for (const [otherId, state] of n.relations) {
+      if (state !== 'war') continue;
+      const other = sim.nationsById[otherId];
+      if (other) chips.push(`<span class="nd-chip war">${escapeHtml(other.name)}と交戦中</span>`);
+    }
+    for (const otherId of n.allies) {
+      const other = sim.nationsById[otherId];
+      if (other) chips.push(`<span class="nd-chip ally">${escapeHtml(other.name)}と同盟</span>`);
+    }
+    ndRelations.innerHTML = chips.length ? chips.join('') : '<span class="nd-empty">目立った外交関係はない</span>';
+
+    const hist = n.history.slice().reverse();
+    ndHistory.innerHTML = hist.length
+      ? hist.map(h => `<div class="nd-history-entry"><span class="t">T${h.turn}</span>${escapeHtml(h.text)}</div>`).join('')
+      : '<div class="nd-empty">記録なし</div>';
+  }
+
+  ndNameInput.addEventListener('change', () => {
+    if (selectedNationId == null || !sim.nationsById[selectedNationId]) return;
+    const n = sim.nationsById[selectedNationId];
+    const trimmed = ndNameInput.value.trim();
+    if (trimmed && trimmed !== n.name) {
+      n.name = trimmed;
+      n.userNamed = true;
+      updateNationList();
+    } else {
+      ndNameInput.value = n.name;
+    }
+  });
+  ndCloseBtn.addEventListener('click', () => selectNation(null));
 
   let cachedLandTotal = null;
   function countLandCells(map) {
@@ -101,7 +200,7 @@
     playPauseBtn.textContent = '再生';
     endTitle.textContent = sim.winner ? '勝者が決定しました' : 'シミュレーション終了';
     endSummary.textContent = sim.winner
-      ? `${sim.winner.name}（${PERSONALITY_INFO[sim.winner.personality].label}）が最終ターン ${sim.turn} で天下を統一、または最大の勢力となりました。`
+      ? `${sim.winner.name}（${PERSONALITY_INFO[sim.winner.personality].label}、指導者 ${sim.winner.leaderName}）が最終ターン ${sim.turn} で天下を統一、または最大の勢力となりました。`
       : `ターン ${sim.turn} で全ての国家が滅亡しました。`;
     const landTotal = countLandCells(sim.map);
     const ranked = sim.nations.slice().sort((a, b) => {
@@ -140,6 +239,7 @@
       if (ticked) {
         updateTurnBadge();
         updateNationList();
+        updateNationDetail();
         chart.render(sim);
       }
     }

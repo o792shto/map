@@ -40,6 +40,34 @@ function generateNationName(rng) {
   return `${base}${state}`;
 }
 
+const LEADER_TITLE = {
+  [PERSONALITY.AGGRESSIVE]: ['将軍', '大元帥', '戦王'],
+  [PERSONALITY.DEFENSIVE]: ['守護公', '摂政', '大司教'],
+  [PERSONALITY.EXPANSIONIST]: ['開拓王', '征服者', '覇王'],
+  [PERSONALITY.MERCHANT]: ['大商人', '総督', '議長'],
+};
+const LEADER_GIVEN = ['アレク', 'ヴィクト', 'カシム', 'テオ', 'レオン', 'マティ', 'ロザ', 'エリナ', 'イサベ', 'ヴォル', 'グレイ', 'シリル', 'オーウェン', 'ナディア', 'ダリオ'];
+const LEADER_SUFFIX = ['ス', 'ール', 'ン', 'ヌス', 'ーヌ', 'ート', 'ア', 'オ', 'リク', 'ヴァ'];
+
+function generateLeaderName(rng, personality) {
+  const given = rng.choice(LEADER_GIVEN) + rng.choice(LEADER_SUFFIX);
+  const title = rng.choice(LEADER_TITLE[personality]);
+  return `${title}${given}`;
+}
+
+const WAR_REASONS = [
+  '国境地帯の領有権を巡る対立',
+  '資源産地の争奪',
+  '積年の因縁による報復',
+  '覇権拡大の野心',
+  '通商路の支配権争い',
+  '同胞保護を名目とした介入',
+  '先の小競り合いへの報復',
+  '威信をかけた示威行動',
+];
+
+function pickWarReason(rng) { return rng.choice(WAR_REASONS); }
+
 function pickDistinctColors(count, rng) {
   const golden = 137.508; // golden angle in degrees, spreads hues evenly
   const startHue = rng.float(0, 360);
@@ -54,9 +82,11 @@ function pickDistinctColors(count, rng) {
 }
 
 class Nation {
-  constructor(id, name, color, personality, capitalIdx) {
+  constructor(id, name, color, personality, capitalIdx, leaderName) {
     this.id = id;
     this.name = name;
+    this.userNamed = false;
+    this.leaderName = leaderName;
     this.color = color;
     this.personality = personality;
     this.capitalIdx = capitalIdx;
@@ -66,10 +96,12 @@ class Nation {
     this.economy = 0;
     this.alive = true;
     this.allies = new Set();
+    this.relations = new Map(); // otherId -> 'war' (absence = peace)
+    this.warSinceTick = new Map(); // otherId -> turn war began
     this.heroBoostTicks = 0;
     this.diedAtTick = null;
     this.foundedAtTick = 0;
-    this.history = [];
+    this.history = []; // {turn, text} major events for this nation's own chronicle
   }
 
   get info() { return PERSONALITY_INFO[this.personality]; }
@@ -78,5 +110,12 @@ class Nation {
   strength() {
     const heroMul = this.heroBoostTicks > 0 ? 1.4 : 1.0;
     return this.military * heroMul;
+  }
+
+  isAtWarWith(otherId) { return this.relations.get(otherId) === 'war'; }
+
+  recordEvent(turn, text) {
+    this.history.push({ turn, text });
+    if (this.history.length > 60) this.history.shift();
   }
 }
