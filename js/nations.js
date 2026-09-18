@@ -69,13 +69,16 @@ const WAR_REASONS = [
 function pickWarReason(rng) { return rng.choice(WAR_REASONS); }
 
 function pickDistinctColors(count, rng) {
+  // Muted, ink/watercolor-like tones (lower saturation, mid lightness) so
+  // territory washes read as a hand-tinted antique map rather than a
+  // neon-bright modern political map.
   const golden = 137.508; // golden angle in degrees, spreads hues evenly
   const startHue = rng.float(0, 360);
   const colors = [];
   for (let i = 0; i < count; i++) {
     const hue = (startHue + i * golden) % 360;
-    const sat = 62 + (i % 3) * 8;
-    const light = 46 + ((i * 5) % 3) * 6;
+    const sat = 38 + (i % 3) * 7;
+    const light = 38 + ((i * 5) % 3) * 5;
     colors.push(`hsl(${hue.toFixed(1)}, ${sat}%, ${light}%)`);
   }
   return colors;

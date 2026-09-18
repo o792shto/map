@@ -1,8 +1,10 @@
-// Canvas rendering: a smoothed, HOI4-style map. Territory colors are baked
-// once per simulation tick into a 1px-per-cell offscreen buffer, then drawn
-// scaled up with bilinear smoothing so borders read as soft coastlines/
-// frontiers instead of hard grid squares. Crisp thin border lines are drawn
-// on top so nations stay readable. Zoom & pan camera + click-to-select.
+// Canvas rendering: a smoothed, hand-tinted antique-atlas style map. Terrain
+// and territory colors are baked once per simulation tick into a 1px-per-
+// cell offscreen buffer (biome tone blended with a translucent nation wash),
+// then drawn scaled up with bilinear smoothing so coastlines/frontiers read
+// soft instead of grid squares. Ink-colored border lines, a paper-grain
+// overlay, and screen-space nation name labels complete the fantasy-map
+// look. Zoom & pan camera + click-to-select.
 
 const BIOME_SHADE = {
   [BIOME.PLAINS]: 0,
@@ -11,6 +13,8 @@ const BIOME_SHADE = {
   [BIOME.MOUNTAIN]: -16,
   [BIOME.DESERT]: 6,
 };
+
+const TERRITORY_WASH_ALPHA = 0.58; // how strongly the nation tint covers the terrain beneath it
 
 function hexToRgb(hex) {
   const m = hex.replace('#', '');
@@ -57,6 +61,7 @@ class Renderer {
     this.dragging = false;
     this.lastMouse = null;
     this.showUnrest = true;
+    this.showLabels = true;
     this.selectedNationId = null;
     this.onCellClick = null;
     this._bufCanvas = null;
@@ -64,6 +69,8 @@ class Renderer {
     this._bufDirtyTurn = -1;
     this._generalBorderPath = null;
     this._nationBorderPaths = new Map();
+    this._labelPositions = new Map(); // nationId -> {x, y} in cell-space
+    this._grainPattern = this.buildGrainPattern();
     this.bindEvents();
     this.fitToScreen();
   }
@@ -72,6 +79,7 @@ class Renderer {
     this.sim = sim;
     this.selectedNationId = null;
     this._bufDirtyTurn = -1;
+    this._landTotalCache = null;
     this.fitToScreen();
   }
 
@@ -197,8 +205,28 @@ class Renderer {
     return Math.hypot(dx, dy);
   }
 
-  // Rebuilds the terrain+territory pixel buffer and border paths. Cheap
-  // enough (one pass over the grid) to redo once per simulation tick.
+  // A small tileable sepia noise pattern, drawn once and reused as a
+  // constant-scale paper-grain overlay so the map reads like an aged sheet
+  // regardless of zoom level.
+  buildGrainPattern() {
+    const size = 128;
+    const c = document.createElement('canvas');
+    c.width = size; c.height = size;
+    const gctx = c.getContext('2d');
+    const imgData = gctx.createImageData(size, size);
+    const data = imgData.data;
+    for (let i = 0; i < size * size; i++) {
+      const p = i * 4;
+      data[p] = 74; data[p + 1] = 58; data[p + 2] = 36;
+      data[p + 3] = Math.floor(Math.random() * 34);
+    }
+    gctx.putImageData(imgData, 0, 0);
+    return this.ctx.createPattern(c, 'repeat');
+  }
+
+  // Rebuilds the terrain+territory pixel buffer, border paths and label
+  // anchor points. Cheap enough (one pass over the grid) to redo once per
+  // simulation tick.
   buildBuffer() {
     const map = this.sim.map;
     if (!this._bufCanvas || this._bufCanvas.width !== map.width || this._bufCanvas.height !== map.height) {
@@ -210,24 +238,34 @@ class Renderer {
     const imgData = this._bufCtx.createImageData(map.width, map.height);
     const data = imgData.data;
     const sim = this.sim;
+    const centroidSum = new Map(); // nationId -> {sx, sy, n}
+
     for (let y = 0; y < map.height; y++) {
       for (let x = 0; x < map.width; x++) {
         const i = map.idx(x, y);
         const owner = map.owner[i];
         const biome = map.biome[i];
-        let rgb = owner === -1 ? BIOME_RGB[biome] : null;
+        const [br, bg, bb] = BIOME_RGB[biome];
+        let r = br, g = bg, b = bb;
         if (owner !== -1) {
           const nation = sim.nationsById[owner];
-          rgb = nation ? shadeNationColor(nation, biome) : BIOME_RGB[biome];
+          if (nation) {
+            const [nr, ng, nb] = shadeNationColor(nation, biome);
+            r = br * (1 - TERRITORY_WASH_ALPHA) + nr * TERRITORY_WASH_ALPHA;
+            g = bg * (1 - TERRITORY_WASH_ALPHA) + ng * TERRITORY_WASH_ALPHA;
+            b = bb * (1 - TERRITORY_WASH_ALPHA) + nb * TERRITORY_WASH_ALPHA;
+            let sum = centroidSum.get(owner);
+            if (!sum) { sum = { sx: 0, sy: 0, n: 0 }; centroidSum.set(owner, sum); }
+            sum.sx += x; sum.sy += y; sum.n++;
+          }
         }
-        let [r, g, b] = rgb;
         if (this.showUnrest && owner !== -1) {
           const u = map.unrest[i];
           if (u > 40) {
-            const a = clamp((u - 40) / 60, 0, 0.55);
-            r = r * (1 - a) + 220 * a;
-            g = g * (1 - a) + 30 * a;
-            b = b * (1 - a) + 30 * a;
+            const a = clamp((u - 40) / 60, 0, 0.45);
+            r = r * (1 - a) + 150 * a;
+            g = g * (1 - a) + 32 * a;
+            b = b * (1 - a) + 24 * a;
           }
         }
         const p = i * 4;
@@ -236,6 +274,12 @@ class Renderer {
     }
     this._bufCtx.putImageData(imgData, 0, 0);
     this._bufDirtyTurn = sim.turn;
+
+    this._labelPositions = new Map();
+    for (const [nationId, sum] of centroidSum) {
+      this._labelPositions.set(nationId, { x: sum.sx / sum.n, y: sum.sy / sum.n, size: sum.n });
+    }
+
     this.buildBorders();
   }
 
@@ -280,13 +324,61 @@ class Renderer {
     this._nationBorderPaths = perNation;
   }
 
+  // Labels are sized with a gentler, tightly-capped curve (so a handful of
+  // huge late-game nations don't produce comically oversized text) and
+  // placed largest-first with simple bounding-box collision skipping so
+  // neighboring names don't pile up on top of each other.
+  drawLabels() {
+    const { ctx, sim, canvas } = this;
+    const landTotal = this._landTotalCache || (this._landTotalCache = (() => {
+      let c = 0;
+      for (let i = 0; i < sim.map.biome.length; i++) if (BIOME_INFO[sim.map.biome[i]].passable) c++;
+      return c;
+    })());
+    const candidates = [];
+    for (const nation of sim.nations) {
+      if (!nation.alive) continue;
+      const pos = this._labelPositions.get(nation.id);
+      if (!pos || pos.size < 3) continue;
+      const sx = pos.x * this.cellPx * this.camera.zoom + this.camera.x;
+      const sy = pos.y * this.cellPx * this.camera.zoom + this.camera.y;
+      if (sx < -80 || sy < -30 || sx > canvas.width + 80 || sy > canvas.height + 30) continue;
+      const share = pos.size / landTotal;
+      const fontSize = clamp(10 + share * 34, 10, 19);
+      candidates.push({ nation, sx, sy, fontSize, size: pos.size });
+    }
+    candidates.sort((a, b) => b.size - a.size); // larger nations get label placement priority
+
+    const placed = [];
+    for (const c of candidates) {
+      ctx.font = `600 ${c.fontSize.toFixed(1)}px "Cinzel", "Yu Mincho", serif`;
+      const textWidth = ctx.measureText(c.nation.name).width;
+      const textHeight = c.fontSize * 1.15;
+      const box = {
+        x0: c.sx - textWidth / 2, x1: c.sx + textWidth / 2,
+        y0: c.sy - textHeight / 2, y1: c.sy + textHeight / 2,
+      };
+      const overlaps = placed.some(p => !(box.x1 < p.x0 || box.x0 > p.x1 || box.y1 < p.y0 || box.y0 > p.y1));
+      if (overlaps) continue;
+      placed.push(box);
+
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.lineWidth = Math.max(2, c.fontSize * 0.22);
+      ctx.strokeStyle = 'rgba(244,232,199,0.85)';
+      ctx.strokeText(c.nation.name, c.sx, c.sy);
+      ctx.fillStyle = c.nation.id === this.selectedNationId ? '#7a2e1d' : '#3b2a19';
+      ctx.fillText(c.nation.name, c.sx, c.sy);
+    }
+  }
+
   render() {
     const { ctx, canvas, sim } = this;
     const map = sim.map;
     if (this._bufDirtyTurn !== sim.turn || !this._bufCanvas) this.buildBuffer();
 
     ctx.save();
-    ctx.fillStyle = '#0a1622';
+    ctx.fillStyle = '#2a2014';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.translate(this.camera.x, this.camera.y);
     ctx.scale(this.camera.zoom, this.camera.zoom);
@@ -297,14 +389,14 @@ class Renderer {
     ctx.drawImage(this._bufCanvas, 0, 0, map.width * cellPx, map.height * cellPx);
 
     if (this._generalBorderPath) {
-      ctx.strokeStyle = 'rgba(8,12,18,0.5)';
+      ctx.strokeStyle = 'rgba(59,42,25,0.55)';
       ctx.lineWidth = 1.1;
       ctx.lineJoin = 'round';
       ctx.stroke(this._generalBorderPath);
     }
 
     if (this.selectedNationId != null && this._nationBorderPaths.has(this.selectedNationId)) {
-      ctx.strokeStyle = '#fff6d6';
+      ctx.strokeStyle = '#c9a227';
       ctx.lineWidth = 3;
       ctx.lineJoin = 'round';
       ctx.stroke(this._nationBorderPaths.get(this.selectedNationId));
@@ -316,13 +408,21 @@ class Renderer {
       const cx = nation.capitalIdx % map.width, cy = Math.floor(nation.capitalIdx / map.width);
       ctx.beginPath();
       ctx.arc((cx + 0.5) * cellPx, (cy + 0.5) * cellPx, cellPx * 0.65, 0, Math.PI * 2);
-      ctx.fillStyle = '#fff8e0';
+      ctx.fillStyle = '#f2dfa0';
       ctx.fill();
       ctx.lineWidth = Math.max(0.5, cellPx * 0.15);
-      ctx.strokeStyle = '#20140a';
+      ctx.strokeStyle = '#3b2a19';
       ctx.stroke();
     }
 
+    ctx.restore();
+
+    if (this.showLabels) this.drawLabels();
+
+    ctx.save();
+    ctx.globalAlpha = 0.55;
+    ctx.fillStyle = this._grainPattern;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.restore();
   }
 }

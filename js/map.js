@@ -11,13 +11,14 @@ const BIOME = Object.freeze({
   DESERT: 5,
 });
 
+// Muted, hand-tinted antique-atlas palette instead of bright flat colors.
 const BIOME_INFO = {
-  [BIOME.OCEAN]:     { name: '海',   color: '#2f6a9e', passable: false, cost: Infinity },
-  [BIOME.PLAINS]:    { name: '平地', color: '#c8d788', passable: true,  cost: 1.0 },
-  [BIOME.GRASSLAND]: { name: '草原', color: '#8fbf5c', passable: true,  cost: 1.0 },
-  [BIOME.FOREST]:    { name: '森',   color: '#3f7a45', passable: true,  cost: 1.5 },
-  [BIOME.MOUNTAIN]:  { name: '山',   color: '#8a8478', passable: true,  cost: 3.0 },
-  [BIOME.DESERT]:    { name: '砂漠', color: '#dcc27a', passable: true,  cost: 2.0 },
+  [BIOME.OCEAN]:     { name: '海',   color: '#6f97a0', passable: false, cost: Infinity },
+  [BIOME.PLAINS]:    { name: '平地', color: '#c9b784', passable: true,  cost: 1.0 },
+  [BIOME.GRASSLAND]: { name: '草原', color: '#a3a86a', passable: true,  cost: 1.0 },
+  [BIOME.FOREST]:    { name: '森',   color: '#5f7a4d', passable: true,  cost: 1.5 },
+  [BIOME.MOUNTAIN]:  { name: '山',   color: '#8c7b64', passable: true,  cost: 3.0 },
+  [BIOME.DESERT]:    { name: '砂漠', color: '#d2b478', passable: true,  cost: 2.0 },
 };
 
 class WorldMap {
