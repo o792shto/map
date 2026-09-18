@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>国家シミュレーション観察ゲーム</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23131b24'/%3E%3Ccircle cx='16' cy='16' r='10' fill='%23d98c2b'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>国家シミュレーション観察ゲーム</h1>
+    <div class="controls">
+      <button id="playPauseBtn" class="btn primary">一時停止</button>
+      <label class="ctrl">
+        速度
+        <input type="range" id="speedSlider" min="1" max="20" value="6">
+      </label>
+      <label class="ctrl">
+        国家数
+        <input type="range" id="nationCountSlider" min="4" max="14" value="8">
+        <span id="nationCountLabel">8</span>
+      </label>
+      <label class="ctrl checkbox">
+        <input type="checkbox" id="endlessToggle">
+        エンドレスモード
+      </label>
+      <button id="regenerateBtn" class="btn">Regenerate</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <div class="map-area">
+      <canvas id="mapCanvas"></canvas>
+      <div class="map-hint">ホイールでズーム / ドラッグで移動</div>
+      <div class="turn-badge" id="turnBadge">Turn 0</div>
+    </div>
+
+    <aside class="sidebar">
+      <section class="panel nations-panel">
+        <h2>国家一覧</h2>
+        <div id="nationList" class="nation-list"></div>
+      </section>
+
+      <section class="panel chart-panel">
+        <h2>領土面積の推移</h2>
+        <canvas id="chartCanvas" height="160"></canvas>
+      </section>
+
+      <section class="panel log-panel">
+        <h2>実況ログ</h2>
+        <div id="logList" class="log-list"></div>
+      </section>
+    </aside>
+  </main>
+
+  <div id="endOverlay" class="overlay hidden">
+    <div class="end-modal">
+      <h2 id="endTitle">シミュレーション終了</h2>
+      <p id="endSummary"></p>
+      <div id="endRanking" class="end-ranking"></div>
+      <div class="end-actions">
+        <button id="endContinueBtn" class="btn">エンドレスで見続ける</button>
+        <button id="endRegenerateBtn" class="btn primary">新しい世界を生成</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/utils.js"></script>
+  <script src="js/noise.js"></script>
+  <script src="js/map.js"></script>
+  <script src="js/nations.js"></script>
+  <script src="js/simulation.js"></script>
+  <script src="js/render.js"></script>
+  <script src="js/chart.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>
