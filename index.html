@@ -19,16 +19,7 @@
         速度
         <input type="range" id="speedSlider" min="1" max="20" value="6">
       </label>
-      <label class="ctrl">
-        国家数
-        <input type="range" id="nationCountSlider" min="4" max="14" value="8">
-        <span id="nationCountLabel">8</span>
-      </label>
-      <label class="ctrl checkbox">
-        <input type="checkbox" id="endlessToggle">
-        エンドレスモード
-      </label>
-      <button id="mapSettingsBtn" class="btn">マップ設定</button>
+      <button id="mapSettingsBtn" class="btn">設定</button>
       <button id="regenerateBtn" class="btn">Regenerate</button>
     </div>
   </header>
@@ -77,33 +68,6 @@
           </div>
         </div>
       </div>
-
-      <div id="mapSettingsOverlay" class="overlay hidden">
-        <div class="end-modal map-settings-modal">
-          <h2>マップ設定</h2>
-          <p class="ms-hint">好みの地形になるまで何度でも再生成できます。</p>
-          <label class="ms-row">
-            陸地の広さ
-            <input type="range" id="landAmountSlider" min="0" max="100" value="55">
-          </label>
-          <label class="ms-row">
-            山地の量
-            <input type="range" id="mountainAmountSlider" min="0" max="100" value="45">
-          </label>
-          <label class="ms-row">
-            海岸線の複雑さ
-            <input type="range" id="coastDetailSlider" min="0" max="4" value="2">
-          </label>
-          <label class="ms-row">
-            シード
-            <input type="text" id="seedInput" class="ms-seed-input" inputmode="numeric">
-          </label>
-          <div class="end-actions">
-            <button id="msRandomSeedBtn" class="btn">ランダムなシード</button>
-            <button id="msGenerateBtn" class="btn primary">この設定で生成</button>
-          </div>
-        </div>
-      </div>
     </div>
 
     <aside class="sidebar">
@@ -124,6 +88,57 @@
     </aside>
   </main>
 
+  <div id="setupOverlay" class="overlay lobby">
+    <div class="end-modal lobby-modal">
+      <h1 class="lobby-title">国家シミュレーション観察ゲーム</h1>
+      <p class="lobby-subtitle">複数の国家が自動で拡張・戦争・滅亡していく世界を、古地図の上でただ見守る観察シムです。</p>
+
+      <div class="setup-section">
+        <h3>マップ</h3>
+        <div class="map-choice-row">
+          <button class="map-choice active" data-preset="random">ランダム生成</button>
+          <button class="map-choice" data-preset="europe">ヨーロッパ</button>
+          <button class="map-choice" data-preset="asia">アジア</button>
+        </div>
+        <div id="randomMapOptions">
+          <label class="ms-row">
+            陸地の広さ
+            <input type="range" id="landAmountSlider" min="0" max="100" value="55">
+          </label>
+          <label class="ms-row">
+            海岸線の複雑さ
+            <input type="range" id="coastDetailSlider" min="0" max="4" value="2">
+          </label>
+        </div>
+        <label class="ms-row">
+          山地の量
+          <input type="range" id="mountainAmountSlider" min="0" max="100" value="45">
+        </label>
+        <label class="ms-row">
+          シード
+          <input type="text" id="seedInput" class="ms-seed-input" inputmode="numeric">
+        </label>
+        <div class="end-actions">
+          <button id="msRandomSeedBtn" class="btn">ランダムなシード</button>
+        </div>
+      </div>
+
+      <div class="setup-section">
+        <h3>国家</h3>
+        <label class="ms-row">
+          国家数
+          <span class="ms-row-inline"><input type="range" id="nationCountSlider" min="4" max="14" value="8"><span id="nationCountLabel">8</span></span>
+        </label>
+        <label class="ms-row">
+          エンドレスモード
+          <input type="checkbox" id="endlessToggle">
+        </label>
+      </div>
+
+      <button id="msGenerateBtn" class="btn primary large">この世界で始める</button>
+    </div>
+  </div>
+
   <div id="endOverlay" class="overlay hidden">
     <div class="end-modal">
       <h2 id="endTitle">シミュレーション終了</h2>
@@ -139,6 +154,7 @@
   <script src="js/utils.js"></script>
   <script src="js/noise.js"></script>
   <script src="js/map.js"></script>
+  <script src="js/presetMaps.js"></script>
   <script src="js/nations.js"></script>
   <script src="js/simulation.js"></script>
   <script src="js/render.js"></script>

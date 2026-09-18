@@ -1,10 +1,11 @@
-// Canvas rendering: a smoothed, hand-tinted antique-atlas style map. Terrain
-// and territory colors are baked once per simulation tick into a 1px-per-
-// cell offscreen buffer (biome tone blended with a translucent nation wash),
-// then drawn scaled up with bilinear smoothing so coastlines/frontiers read
-// soft instead of grid squares. Ink-colored border lines, a paper-grain
-// overlay, and screen-space nation name labels complete the fantasy-map
-// look. Zoom & pan camera + click-to-select.
+// Canvas rendering: a crisp, hand-tinted antique-atlas style map. Terrain and
+// territory colors are baked once per simulation tick into a 1px-per-cell
+// offscreen buffer (a monochrome ink terrain tone blended with a translucent
+// nation wash), drawn without smoothing so edges stay sharp. Smoothness in
+// national borders comes from thick, round-jointed ink stroke lines rather
+// than a blurred raster, so the map reads as sharply inked rather than soft-
+// focus. A paper-grain overlay and screen-space nation name labels complete
+// the look. Zoom & pan camera + click-to-select.
 
 const BIOME_SHADE = {
   [BIOME.PLAINS]: 0,
@@ -14,7 +15,7 @@ const BIOME_SHADE = {
   [BIOME.DESERT]: 6,
 };
 
-const TERRITORY_WASH_ALPHA = 0.58; // how strongly the nation tint covers the terrain beneath it
+const TERRITORY_WASH_ALPHA = 0.5; // how strongly the nation tint covers the terrain beneath it
 
 function hexToRgb(hex) {
   const m = hex.replace('#', '');
@@ -383,22 +384,26 @@ class Renderer {
     ctx.translate(this.camera.x, this.camera.y);
     ctx.scale(this.camera.zoom, this.camera.zoom);
 
-    ctx.imageSmoothingEnabled = true;
-    if ('imageSmoothingQuality' in ctx) ctx.imageSmoothingQuality = 'high';
+    // No bilinear smoothing: keep the terrain fill crisp. Smooth-looking
+    // borders come from the thick, round-jointed ink strokes below, which
+    // are wide enough to visually mask the underlying per-cell jaggedness.
+    ctx.imageSmoothingEnabled = false;
     const cellPx = this.cellPx;
     ctx.drawImage(this._bufCanvas, 0, 0, map.width * cellPx, map.height * cellPx);
 
     if (this._generalBorderPath) {
-      ctx.strokeStyle = 'rgba(59,42,25,0.55)';
-      ctx.lineWidth = 1.1;
+      ctx.strokeStyle = 'rgba(59,42,25,0.6)';
+      ctx.lineWidth = 2.2;
       ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
       ctx.stroke(this._generalBorderPath);
     }
 
     if (this.selectedNationId != null && this._nationBorderPaths.has(this.selectedNationId)) {
       ctx.strokeStyle = '#c9a227';
-      ctx.lineWidth = 3;
+      ctx.lineWidth = 4.5;
       ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
       ctx.stroke(this._nationBorderPaths.get(this.selectedNationId));
     }
 

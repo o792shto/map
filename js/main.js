@@ -43,7 +43,9 @@
   const ndDirPeace = document.getElementById('ndDirPeace');
 
   const mapSettingsBtn = document.getElementById('mapSettingsBtn');
-  const mapSettingsOverlay = document.getElementById('mapSettingsOverlay');
+  const setupOverlay = document.getElementById('setupOverlay');
+  const randomMapOptions = document.getElementById('randomMapOptions');
+  const mapChoiceButtons = [...document.querySelectorAll('.map-choice')];
   const landAmountSlider = document.getElementById('landAmountSlider');
   const mountainAmountSlider = document.getElementById('mountainAmountSlider');
   const coastDetailSlider = document.getElementById('coastDetailSlider');
@@ -62,6 +64,8 @@
   let selectedNationId = null;
   let pendingDirective = null; // {type: 'expand'|'war'|'ally'|'peace', sourceId}
   let lastGeneratedSeed = null;
+  let currentPreset = 'random'; // 'random' | 'europe' | 'asia'
+  let gameStarted = false;
 
   function resizeMapCanvas() {
     const rect = mapCanvas.getBoundingClientRect();
@@ -79,11 +83,16 @@
     const landAmount = parseInt(landAmountSlider.value, 10);
     const mountainAmount = parseInt(mountainAmountSlider.value, 10);
     const coastDetail = parseInt(coastDetailSlider.value, 10);
-    return {
-      seaLevel: 0.56 - (landAmount / 100) * 0.42,
+    const options = {
       mountainThreshold: 0.9 - (mountainAmount / 100) * 0.5,
-      coastPasses: 4 - coastDetail,
     };
+    if (currentPreset === 'random') {
+      options.seaLevel = 0.56 - (landAmount / 100) * 0.42;
+      options.coastPasses = 4 - coastDetail;
+    } else {
+      options.presetId = currentPreset;
+    }
+    return options;
   }
 
   function createNewSimulation(seedOverride) {
@@ -403,11 +412,26 @@
     updateTurnBadge();
   });
 
-  mapSettingsBtn.addEventListener('click', () => {
-    mapSettingsOverlay.classList.remove('hidden');
+  function closeSetupOverlay() {
+    if (!gameStarted) return; // the initial lobby can't be dismissed without starting
+    setupOverlay.classList.add('hidden');
+  }
+
+  mapChoiceButtons.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      currentPreset = btn.dataset.preset;
+      mapChoiceButtons.forEach((b) => b.classList.toggle('active', b === btn));
+      randomMapOptions.classList.toggle('hidden', currentPreset !== 'random');
+    });
   });
-  mapSettingsOverlay.addEventListener('click', (e) => {
-    if (e.target === mapSettingsOverlay) mapSettingsOverlay.classList.add('hidden');
+
+  mapSettingsBtn.addEventListener('click', () => {
+    setupOverlay.classList.add('dim');
+    setupOverlay.classList.remove('hidden');
+    msGenerateBtn.textContent = 'この設定で生成';
+  });
+  setupOverlay.addEventListener('click', (e) => {
+    if (e.target === setupOverlay) closeSetupOverlay();
   });
   msRandomSeedBtn.addEventListener('click', () => {
     seedInput.value = String(Math.floor(Math.random() * 1e9));
@@ -416,21 +440,22 @@
     let seed = parseInt(seedInput.value, 10);
     if (!Number.isFinite(seed) || seed === lastGeneratedSeed) seed = Math.floor(Math.random() * 1e9);
     createNewSimulation(seed);
-    mapSettingsOverlay.classList.add('hidden');
+    setupOverlay.classList.add('hidden');
     paused = false;
     playPauseBtn.textContent = '一時停止';
+    if (!gameStarted) {
+      gameStarted = true;
+      requestAnimationFrame(frame);
+    }
   });
 
   window.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
     if (pendingDirective) { cancelDirective(); return; }
-    if (!mapSettingsOverlay.classList.contains('hidden')) mapSettingsOverlay.classList.add('hidden');
+    if (!setupOverlay.classList.contains('hidden')) closeSetupOverlay();
   });
 
   window.addEventListener('resize', resizeMapCanvas);
 
   resizeMapCanvas();
-  createNewSimulation();
-  resizeMapCanvas();
-  requestAnimationFrame(frame);
 })();

@@ -11,14 +11,16 @@ const BIOME = Object.freeze({
   DESERT: 5,
 });
 
-// Muted, hand-tinted antique-atlas palette instead of bright flat colors.
+// Single-pigment "ink on paper" palette: every biome is a shade of the same
+// sepia/tan hue family (no greens or blues), like a hand-tinted antique map
+// where terrain is read from tone and texture rather than color.
 const BIOME_INFO = {
-  [BIOME.OCEAN]:     { name: '海',   color: '#6f97a0', passable: false, cost: Infinity },
-  [BIOME.PLAINS]:    { name: '平地', color: '#c9b784', passable: true,  cost: 1.0 },
-  [BIOME.GRASSLAND]: { name: '草原', color: '#a3a86a', passable: true,  cost: 1.0 },
-  [BIOME.FOREST]:    { name: '森',   color: '#5f7a4d', passable: true,  cost: 1.5 },
-  [BIOME.MOUNTAIN]:  { name: '山',   color: '#8c7b64', passable: true,  cost: 3.0 },
-  [BIOME.DESERT]:    { name: '砂漠', color: '#d2b478', passable: true,  cost: 2.0 },
+  [BIOME.OCEAN]:     { name: '海',   color: '#b7ae95', passable: false, cost: Infinity },
+  [BIOME.PLAINS]:    { name: '平地', color: '#dccb9a', passable: true,  cost: 1.0 },
+  [BIOME.GRASSLAND]: { name: '草原', color: '#d2c28e', passable: true,  cost: 1.0 },
+  [BIOME.FOREST]:    { name: '森',   color: '#a8987a', passable: true,  cost: 1.5 },
+  [BIOME.MOUNTAIN]:  { name: '山',   color: '#94835f', passable: true,  cost: 3.0 },
+  [BIOME.DESERT]:    { name: '砂漠', color: '#e6d7a8', passable: true,  cost: 2.0 },
 };
 
 class WorldMap {
@@ -42,6 +44,9 @@ class WorldMap {
     this.seaLevel = options.seaLevel != null ? options.seaLevel : 0.35;
     this.mountainThreshold = options.mountainThreshold != null ? options.mountainThreshold : 0.72;
     this.coastPasses = options.coastPasses != null ? options.coastPasses : 2;
+    // When set, land/sea comes from this real-world coastline mask (1=land)
+    // instead of noise, so preset maps (Europe/Asia) stay recognizable.
+    this.presetMask = options.presetMask || null;
     this.generate();
   }
 
@@ -66,15 +71,17 @@ class WorldMap {
     const scale = Math.max(width, height) / 5;
     const cx = width / 2, cy = height / 2;
     const maxDist = Math.sqrt(cx * cx + cy * cy);
-    const seaLevel = this.seaLevel;
+    const usingPreset = !!this.presetMask;
 
     for (let y = 0; y < height; y++) {
       for (let x = 0; x < width; x++) {
         const i = this.idx(x, y);
         let e = elevNoise.fbm(x / scale, y / scale, 4) * 0.5 + 0.5; // 0..1
-        // gentle radial falloff so oceans frame the map without dominating it
-        const dist = Math.sqrt((x - cx) ** 2 + (y - cy) ** 2) / maxDist;
-        e -= Math.pow(dist, 2.6) * 0.36;
+        if (!usingPreset) {
+          // gentle radial falloff so oceans frame the map without dominating it
+          const dist = Math.sqrt((x - cx) ** 2 + (y - cy) ** 2) / maxDist;
+          e -= Math.pow(dist, 2.6) * 0.36;
+        }
         this.elevation[i] = e;
 
         let m = moistNoise.fbm(x / (scale * 0.7) + 100, y / (scale * 0.7) + 100, 4) * 0.5 + 0.5;
@@ -83,7 +90,9 @@ class WorldMap {
         const rv = resNoise.fbm(x / 6 + 50, y / 6 + 50, 3) * 0.5 + 0.5; // 0..1 local variance
         this.resourceVariance[i] = rv;
 
-        const biome = this.classifyBiome(e, m);
+        const biome = usingPreset
+          ? (this.presetMask[i] ? this.classifyBiome(e, m, true) : BIOME.OCEAN)
+          : this.classifyBiome(e, m, false);
         this.biome[i] = biome;
         const [food, gold, iron] = this.rollResources(biome, rv);
         this.food[i] = food;
@@ -92,12 +101,22 @@ class WorldMap {
       }
     }
 
-    this.smoothCoastline(this.coastPasses);
+    // Real coastlines are already clean; only noise-generated ones need the
+    // cellular-automaton smoothing pass.
+    if (!usingPreset) this.smoothCoastline(this.coastPasses);
   }
 
-  classifyBiome(e, m) {
-    if (e < this.seaLevel) return BIOME.OCEAN;
-    const ne = (e - this.seaLevel) / (1 - this.seaLevel);
+  // `landAlready` is set when land/sea is decided externally (a preset
+  // coastline mask): `e` is then used directly as the 0..1 "how rugged"
+  // signal instead of being renormalized above a noise-based sea level.
+  classifyBiome(e, m, landAlready) {
+    let ne;
+    if (landAlready) {
+      ne = clamp(e, 0, 1);
+    } else {
+      if (e < this.seaLevel) return BIOME.OCEAN;
+      ne = (e - this.seaLevel) / (1 - this.seaLevel);
+    }
     if (ne > this.mountainThreshold) return BIOME.MOUNTAIN;
     if (m < 0.32) return BIOME.DESERT;
     if (m < 0.52) return BIOME.PLAINS;

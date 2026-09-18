@@ -17,11 +17,20 @@ class Simulation {
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.seed = (config.seed != null) ? config.seed : Math.floor(Math.random() * 1e9);
     this.rng = new RNG(this.seed);
-    this.map = new WorldMap(this.config.width, this.config.height, this.seed, {
+
+    const preset = this.config.presetId && PRESET_MAPS[this.config.presetId];
+    const mapOptions = {
       seaLevel: this.config.seaLevel,
       mountainThreshold: this.config.mountainThreshold,
       coastPasses: this.config.coastPasses,
-    });
+    };
+    let mapWidth = this.config.width, mapHeight = this.config.height;
+    if (preset) {
+      mapWidth = preset.width;
+      mapHeight = preset.height;
+      mapOptions.presetMask = decodePresetMask(preset);
+    }
+    this.map = new WorldMap(mapWidth, mapHeight, this.seed, mapOptions);
     this.nations = [];
     this.nationsById = {};
     this.turn = 0;
@@ -170,6 +179,45 @@ class Simulation {
     this.checkEnd();
   }
 
+  capitalDistance(a, b) {
+    const w = this.map.width;
+    const ax = a.capitalIdx % w, ay = Math.floor(a.capitalIdx / w);
+    const bx = b.capitalIdx % w, by = Math.floor(b.capitalIdx / w);
+    return Math.hypot(ax - bx, ay - by);
+  }
+
+  // Where a nation "leans" its everyday (non-directed) growth: strongly
+  // toward the nearest nation it's at war with (a visible front line),
+  // more mildly toward the nearest nation it's merely in contact with.
+  // Without this, growth is a uniform blob with no sense of who's pushing
+  // against whom.
+  computeFocusPoint(nation) {
+    let bestWar = null, bestWarDist = Infinity;
+    for (const [otherId, state] of nation.relations) {
+      if (state !== 'war') continue;
+      const other = this.nationsById[otherId];
+      if (!other || !other.alive || other.territorySize === 0) continue;
+      const d = this.capitalDistance(nation, other);
+      if (d < bestWarDist) { bestWarDist = d; bestWar = other; }
+    }
+    if (bestWar) return { idx: bestWar.capitalIdx, strength: 1.8 };
+
+    const contactIds = new Set(this._neighborMap.get(nation.id) || []);
+    for (const { a, b } of this._navalContacts.values()) {
+      if (a === nation.id) contactIds.add(b);
+      else if (b === nation.id) contactIds.add(a);
+    }
+    let bestNeighbor = null, bestNeighborDist = Infinity;
+    for (const otherId of contactIds) {
+      const other = this.nationsById[otherId];
+      if (!other || !other.alive || other.territorySize === 0) continue;
+      const d = this.capitalDistance(nation, other);
+      if (d < bestNeighborDist) { bestNeighborDist = d; bestNeighbor = other; }
+    }
+    if (bestNeighbor) return { idx: bestNeighbor.capitalIdx, strength: 1.3 };
+    return null;
+  }
+
   processExpansion(aliveNations, expansionCandidates) {
     const map = this.map;
     for (const nation of aliveNations) {
@@ -181,6 +229,7 @@ class Simulation {
       const mods = nation.mods;
       const power = (nation.population * 0.4 + nation.economy * 0.6) / 120;
       const directed = nation.directiveTarget;
+      const focus = directed ? null : this.computeFocusPoint(nation);
       const maxClaims = directed ? 5 : 3;
       let claims = 0;
       let candArr = [...candidates];
@@ -194,12 +243,26 @@ class Simulation {
       } else {
         candArr = this.rng.shuffle(candArr);
       }
+      const capX = nation.capitalIdx % map.width, capY = Math.floor(nation.capitalIdx / map.width);
+      const fx = focus ? focus.idx % map.width : 0, fy = focus ? Math.floor(focus.idx / map.width) : 0;
+      const capToFocus = focus ? Math.hypot(capX - fx, capY - fy) : 0;
       for (const cellIdx of candArr) {
         if (claims >= maxClaims) break;
         const biome = map.biome[cellIdx];
         const cost = BIOME_INFO[biome].cost;
         let prob = clamp(0.5 * power * mods.expansionMul / cost, 0, 0.9);
-        if (directed) prob = clamp(prob * 1.6, 0, 0.95); // player-directed expansion pushes harder
+        if (directed) {
+          prob = clamp(prob * 1.6, 0, 0.95); // player-directed expansion pushes harder
+        } else if (focus) {
+          // Cells that bring us closer to the rival than our capital already
+          // is get pushed harder; cells that grow away from the front are
+          // held back, so territory visibly leans toward the conflict.
+          const cx = cellIdx % map.width, cy = Math.floor(cellIdx / map.width);
+          const cellToFocus = Math.hypot(cx - fx, cy - fy);
+          prob = cellToFocus < capToFocus
+            ? clamp(prob * focus.strength, 0, 0.95)
+            : clamp(prob * (2 - focus.strength), 0, 0.9);
+        }
         if (this.rng.chance(prob)) {
           this.claimCell(cellIdx, nation, false);
           claims++;
