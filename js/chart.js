@@ -22,7 +22,7 @@ class ChartRenderer {
     this.resize();
     const { ctx, canvas } = this;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = '#0f1c2b';
+    ctx.fillStyle = '#ece0bd';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
     const history = sim.territoryHistory;
@@ -32,8 +32,8 @@ class ChartRenderer {
     if (w <= 0 || h <= 0) return;
 
     if (history.length < 2) {
-      ctx.fillStyle = 'rgba(255,255,255,0.4)';
-      ctx.font = '11px sans-serif';
+      ctx.fillStyle = 'rgba(59,42,25,0.5)';
+      ctx.font = '11px "EB Garamond", serif';
       ctx.fillText('データ収集中...', padding.left, padding.top + h / 2);
       return;
     }
@@ -41,7 +41,7 @@ class ChartRenderer {
     let maxSize = 1;
     for (const p of history) for (const e of p.entries) if (e.size > maxSize) maxSize = e.size;
 
-    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    ctx.strokeStyle = 'rgba(59,42,25,0.15)';
     ctx.beginPath();
     for (let i = 0; i <= 4; i++) {
       const y = padding.top + h * (i / 4);
@@ -50,8 +50,8 @@ class ChartRenderer {
     }
     ctx.stroke();
 
-    ctx.fillStyle = 'rgba(255,255,255,0.5)';
-    ctx.font = '9px sans-serif';
+    ctx.fillStyle = 'rgba(59,42,25,0.6)';
+    ctx.font = '9px "EB Garamond", serif';
     for (let i = 0; i <= 4; i++) {
       const val = Math.round(maxSize * (1 - i / 4));
       ctx.fillText(String(val), 2, padding.top + h * (i / 4) + 3);

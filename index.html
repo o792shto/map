@@ -4,7 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>国家シミュレーション観察ゲーム</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23131b24'/%3E%3Ccircle cx='16' cy='16' r='10' fill='%23d98c2b'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%233b2a19'/%3E%3Ccircle cx='16' cy='16' r='10' fill='%23c9a227'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;600;700&family=EB+Garamond:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
@@ -16,15 +19,7 @@
         速度
         <input type="range" id="speedSlider" min="1" max="20" value="6">
       </label>
-      <label class="ctrl">
-        国家数
-        <input type="range" id="nationCountSlider" min="4" max="14" value="8">
-        <span id="nationCountLabel">8</span>
-      </label>
-      <label class="ctrl checkbox">
-        <input type="checkbox" id="endlessToggle">
-        エンドレスモード
-      </label>
+      <button id="mapSettingsBtn" class="btn">設定</button>
       <button id="regenerateBtn" class="btn">Regenerate</button>
     </div>
   </header>
@@ -32,8 +27,48 @@
   <main class="layout">
     <div class="map-area">
       <canvas id="mapCanvas"></canvas>
-      <div class="map-hint">ホイールでズーム / ドラッグで移動</div>
-      <div class="turn-badge" id="turnBadge">Turn 0</div>
+      <div class="map-hint" id="mapHint">ホイールでズーム / ドラッグで移動 / クリックで国家を選択</div>
+      <div class="turn-badge" id="turnBadge">0年</div>
+      <div id="eventBannerStack" class="event-banner-stack"></div>
+
+      <div id="nationDetail" class="nation-detail hidden">
+        <div class="nation-detail-header">
+          <span class="nation-swatch large" id="ndSwatch"></span>
+          <input id="ndNameInput" class="nation-name-input" maxlength="24" spellcheck="false">
+          <button id="ndCloseBtn" class="icon-btn" title="閉じる">×</button>
+        </div>
+        <div class="nation-detail-body">
+          <div class="nd-row"><span class="nd-label">指導者</span><span id="ndLeader"></span></div>
+          <div class="nd-row"><span class="nd-label">性格</span><span id="ndPersonality"></span></div>
+          <div class="nd-row"><span class="nd-label">政治体制</span><span id="ndPolitical"></span></div>
+          <div class="nd-row"><span class="nd-label">生活様式</span><span id="ndLifestyle"></span></div>
+          <div class="nd-row"><span class="nd-label">特性</span><span id="ndTrait"></span></div>
+          <div class="nd-row"><span class="nd-label">建国</span><span id="ndFounded"></span></div>
+          <div class="nd-stats">
+            <div><span class="nd-label">人口</span><b id="ndPop"></b></div>
+            <div><span class="nd-label">軍事力</span><b id="ndMil"></b></div>
+            <div><span class="nd-label">経済力</span><b id="ndEco"></b></div>
+            <div><span class="nd-label">領土</span><b id="ndTerritory"></b></div>
+          </div>
+          <div class="nd-section" id="ndDirectiveSection">
+            <h3>指令</h3>
+            <div class="nd-directives">
+              <button id="ndDirExpand" class="btn small">拡張方向を指示</button>
+              <button id="ndDirWar" class="btn small danger">宣戦布告</button>
+              <button id="ndDirAlly" class="btn small">同盟を提案</button>
+              <button id="ndDirPeace" class="btn small">休戦を提案</button>
+            </div>
+          </div>
+          <div class="nd-section">
+            <h3>外交関係</h3>
+            <div id="ndRelations" class="nd-relations"></div>
+          </div>
+          <div class="nd-section">
+            <h3>年代記</h3>
+            <div id="ndHistory" class="nd-history"></div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <aside class="sidebar">
@@ -54,6 +89,80 @@
     </aside>
   </main>
 
+  <div id="setupOverlay" class="overlay lobby">
+    <div class="end-modal lobby-modal">
+      <h1 class="lobby-title">国家シミュレーション観察ゲーム</h1>
+      <p class="lobby-subtitle">複数の国家が自動で拡張・戦争・滅亡していく世界を、古地図の上でただ見守る観察シムです。</p>
+
+      <div class="setup-section">
+        <h3>マップ</h3>
+        <div class="map-choice-row">
+          <button class="map-choice active" data-preset="random">ランダム生成</button>
+          <button class="map-choice" data-preset="europe">ヨーロッパ</button>
+          <button class="map-choice" data-preset="asia">アジア</button>
+        </div>
+        <div id="randomMapOptions">
+          <label class="ms-row">
+            陸地の広さ
+            <input type="range" id="landAmountSlider" min="0" max="100" value="55">
+          </label>
+          <label class="ms-row">
+            海岸線の複雑さ
+            <input type="range" id="coastDetailSlider" min="0" max="4" value="2">
+          </label>
+        </div>
+        <label class="ms-row">
+          山地の量
+          <input type="range" id="mountainAmountSlider" min="0" max="100" value="45">
+        </label>
+        <label class="ms-row">
+          シード
+          <input type="text" id="seedInput" class="ms-seed-input" inputmode="numeric">
+        </label>
+        <div class="end-actions">
+          <button id="msRandomSeedBtn" class="btn">ランダムなシード</button>
+        </div>
+      </div>
+
+      <div class="setup-section">
+        <h3>国家</h3>
+        <label class="ms-row">
+          国家数
+          <span class="ms-row-inline"><input type="range" id="nationCountSlider" min="4" max="14" value="8"><span id="nationCountLabel">8</span></span>
+        </label>
+        <label class="ms-row">
+          エンドレスモード
+          <input type="checkbox" id="endlessToggle">
+        </label>
+      </div>
+
+      <div class="setup-section">
+        <h3>開始モード</h3>
+        <div class="map-choice-row">
+          <button class="start-mode-choice active" data-mode="established">領土を持って開始</button>
+          <button class="start-mode-choice" data-mode="fromZero">首都のみ(0)から</button>
+        </div>
+        <div id="fromZeroOptions" class="hidden">
+          <label class="ctrl checkbox fz-manual-toggle">
+            <input type="checkbox" id="manualPlacementToggle">
+            配置と国名を手動で設定する
+          </label>
+          <div id="manualPlacementPanel" class="hidden">
+            <canvas id="placementPreview" width="380" height="200"></canvas>
+            <p class="ms-hint">地図の陸地をクリックして首都を配置してください（先頭から順に配置されます）。</p>
+            <div id="placementSlotList" class="placement-slot-list"></div>
+            <div class="end-actions">
+              <button id="placementRandomFillBtn" class="btn small">残りをランダム配置</button>
+              <button id="placementResetBtn" class="btn small">配置をリセット</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <button id="msGenerateBtn" class="btn primary large">この世界で始める</button>
+    </div>
+  </div>
+
   <div id="endOverlay" class="overlay hidden">
     <div class="end-modal">
       <h2 id="endTitle">シミュレーション終了</h2>
@@ -69,6 +178,7 @@
   <script src="js/utils.js"></script>
   <script src="js/noise.js"></script>
   <script src="js/map.js"></script>
+  <script src="js/presetMaps.js"></script>
   <script src="js/nations.js"></script>
   <script src="js/simulation.js"></script>
   <script src="js/render.js"></script>
