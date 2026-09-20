@@ -285,6 +285,7 @@
     seedInput.value = String(sim.seed);
     sim.onLog = (entry) => { appendLogEntry(entry); maybeShowEventBanner(entry); };
     sim.onEnd = () => showEndOverlay();
+    sim.onBattleEffect = (x, y, kind) => { if (renderer) renderer.addBattleEffect(x, y, kind); };
     if (!renderer) {
       renderer = new Renderer(mapCanvas, sim);
       renderer.onCellClick = onMapClick;
@@ -389,6 +390,7 @@
     war: '宣戦布告', death: '滅亡', found: '建国', goldenage: '黄金時代',
     disaster: '天災', crisis: '内乱', rebellion: '反乱', raid: '異民族侵入',
     hero: '英雄の出現', exploration: '新天地', end: '終幕',
+    split: '分裂独立', vassal: '属国化', annex: '併合',
   };
   function maybeShowEventBanner(entry) {
     const tag = BANNER_TAGS[entry.kind];
@@ -425,9 +427,12 @@
       const pct = landTotal > 0 ? ((n.territorySize / landTotal) * 100).toFixed(1) : '0.0';
       const wars = warCount(n);
       const allies = n.allies.size;
+      const vassalOverlord = n.vassalOf != null ? sim.nationsById[n.vassalOf] : null;
       const badges = (n.alive ? (
         (wars > 0 ? `<span class="badge-war">交戦×${wars}</span>` : '') +
-        (allies > 0 ? `<span class="badge-ally">同盟×${allies}</span>` : '')
+        (allies > 0 ? `<span class="badge-ally">同盟×${allies}</span>` : '') +
+        (n.vassals.size > 0 ? `<span class="badge-vassal">属国×${n.vassals.size}</span>` : '') +
+        (vassalOverlord ? `<span class="badge-vassal">${escapeHtml(vassalOverlord.name)}の属国</span>` : '')
       ) : '');
       return `<div class="nation-row ${n.alive ? '' : 'dead'} ${n.id === selectedNationId ? 'selected' : ''}" data-id="${n.id}">
         <span class="nation-swatch" style="background:${n.color}"></span>
@@ -472,6 +477,14 @@
     ndDirectiveSection.style.display = n.alive ? '' : 'none';
 
     const chips = [];
+    if (n.vassalOf != null) {
+      const overlord = sim.nationsById[n.vassalOf];
+      if (overlord) chips.push(`<span class="nd-chip vassal">${escapeHtml(overlord.name)}: 宗主国（属国）</span>`);
+    }
+    for (const vassalId of n.vassals) {
+      const vassal = sim.nationsById[vassalId];
+      if (vassal && vassal.alive) chips.push(`<span class="nd-chip vassal">${escapeHtml(vassal.name)}: 属国</span>`);
+    }
     const warIds = new Set();
     for (const [otherId, state] of n.relations) {
       if (state !== 'war') continue;

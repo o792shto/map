@@ -145,6 +145,10 @@ class Nation {
     this.capitalIdx = capitalIdx;
     this.territory = new Set([capitalIdx]);
     this.ownedStates = new Set(); // stateIds this nation currently holds
+    this.lastSplitTick = null; // turn of this nation's most recent civil-war split, for a cooldown
+    this.vassalOf = null; // nationId of this nation's overlord, or null if fully independent
+    this.vassals = new Set(); // nationIds currently subject to this nation
+    this.vassalSinceTick = null;
     this.population = 0;
     this.military = 0;
     this.economy = 0;

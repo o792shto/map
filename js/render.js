@@ -1,14 +1,15 @@
 // Canvas rendering: a crisp, hand-tinted antique-atlas style map. Terrain
 // colors are baked once per simulation tick into a 1px-per-cell offscreen
 // buffer and drawn without smoothing so terrain stays sharp. National
-// territory is drawn separately as smooth filled vector shapes: each
-// nation's true cell-ownership boundary is traced into closed loops
-// (a marching-squares-style contour extraction), simplified, and rounded
-// with Chaikin corner-cutting, so borders read as smooth coastlines/
-// frontiers rather than a staircase of pixels, while the fill exactly
-// matches true ownership (holes stay real holes, no raster artifacts). A
-// paper-grain overlay and screen-space nation name labels complete the
-// look. Zoom & pan camera + click-to-select.
+// territory is drawn separately as filled vector shapes: each nation's true
+// cell-ownership boundary is traced into closed loops (a marching-squares-
+// style contour extraction) and simplified to drop collinear points, but
+// left otherwise unrounded — with states as the unit of ownership, borders
+// already read as deliberate province edges, and heavy corner-rounding just
+// made them harder to follow. A bold ink stroke keeps them legible at a
+// glance. The fill exactly matches true ownership (holes stay real holes,
+// no raster artifacts). A paper-grain overlay and screen-space nation name
+// labels complete the look. Zoom & pan camera + click-to-select.
 
 const BIOME_SHADE = {
   [BIOME.PLAINS]: 0,
@@ -19,7 +20,7 @@ const BIOME_SHADE = {
 };
 
 const TERRITORY_WASH_ALPHA = 0.5; // how strongly the nation tint covers the terrain beneath it
-const CHAIKIN_ITERATIONS = 2;
+const CHAIKIN_ITERATIONS = 0; // borders trace the true state shape rather than being rounded away
 
 function hexToRgb(hex) {
   const m = hex.replace('#', '');
@@ -144,6 +145,7 @@ class Renderer {
     this.showLabels = true;
     this.selectedNationId = null;
     this.pendingDirective = null; // {type: 'war'|'ally'|'peace'|'expand', sourceId} — drives target-candidate markers
+    this.battleEffects = []; // {x, y, kind, start} — transient real-time flashes at recent battle/landing sites
     this.onCellClick = null;
     this._bufCanvas = null;
     this._bufCtx = null;
@@ -160,7 +162,14 @@ class Renderer {
     this.selectedNationId = null;
     this._bufDirtyTurn = -1;
     this._landTotalCache = null;
+    this.battleEffects = [];
     this.fitToScreen();
+  }
+
+  // Called from outside (wired to Simulation's onBattleEffect) whenever a
+  // battle or landing happens at a specific map location, x/y in cell coords.
+  addBattleEffect(x, y, kind) {
+    this.battleEffects.push({ x, y, kind, start: performance.now() });
   }
 
   minZoom() {
@@ -506,6 +515,38 @@ class Renderer {
     }
   }
 
+  // A brief expanding ring + flash icon at a recent battle/amphibious-landing
+  // site, purely cosmetic and driven by real wall-clock time so it animates
+  // smoothly regardless of simulation speed — the point is to make an attack
+  // an actual moment to watch rather than a border silently shifting.
+  drawBattleEffects() {
+    if (this.battleEffects.length === 0) return;
+    const { ctx, cellPx, camera } = this;
+    const DURATION = 1300;
+    const now = performance.now();
+    this.battleEffects = this.battleEffects.filter((e) => now - e.start < DURATION);
+    for (const e of this.battleEffects) {
+      const t = (now - e.start) / DURATION;
+      const cx = (e.x + 0.5) * cellPx, cy = (e.y + 0.5) * cellPx;
+      const naval = e.kind === 'naval';
+      const color = naval ? '90,138,143' : '168,67,44';
+      const ringRadius = (cellPx * 0.7) + t * cellPx * 3.5;
+      ctx.beginPath();
+      ctx.arc(cx, cy, ringRadius, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(${color},${(1 - t) * 0.85})`;
+      ctx.lineWidth = Math.max(1, (2.4 * (1 - t * 0.6)) / camera.zoom);
+      ctx.stroke();
+      if (t < 0.55) {
+        const iconAlpha = 1 - t / 0.55;
+        ctx.font = `${Math.max(10, 15 / camera.zoom)}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = `rgba(255,236,190,${iconAlpha})`;
+        ctx.fillText(naval ? '⚓' : '✦', cx, cy);
+      }
+    }
+  }
+
   render() {
     const { ctx, canvas, sim } = this;
     const map = sim.map;
@@ -538,8 +579,8 @@ class Renderer {
       if (!nation.alive) continue;
       const path = this._nationShapePaths.get(nation.id);
       if (!path) continue;
-      ctx.strokeStyle = 'rgba(59,42,25,0.65)';
-      ctx.lineWidth = 1.4;
+      ctx.strokeStyle = 'rgba(48,34,20,0.8)';
+      ctx.lineWidth = 1.8;
       ctx.stroke(path);
     }
 
@@ -561,6 +602,8 @@ class Renderer {
       ctx.strokeStyle = '#3b2a19';
       ctx.stroke();
     }
+
+    this.drawBattleEffects();
 
     ctx.restore();
 

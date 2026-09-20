@@ -13,11 +13,18 @@ const DEFAULT_CONFIG = Object.freeze({
   nationCount: 8,
   maxTurns: 2000,
   endless: false,
-  stateTargetCells: 60,
+  stateTargetCells: 22,
 });
 
 const NAVAL_RANGE = 22;
 const NAVAL_THROTTLE_TICKS = 5;
+const NAVAL_MIN_SAME_LANDMASS_HOPS = 4;
+const TERRITORIAL_CHECK_INTERVAL = 20; // ticks between exclave/civil-war sweeps
+const EXCLAVE_REVERT_MAX = 3; // states; a cut-off scrap this small or smaller just falls out of control
+const CIVIL_WAR_MIN_SIZE = 12; // states; a cut-off or rebellious cluster this big can organize into a new nation
+const CIVIL_WAR_COOLDOWN = 400; // ticks a nation must wait after splitting before it can split again
+const VASSAL_CAPITULATION_MAX_STATES = 5; // a loser this small (or smaller) may submit rather than fight to the end
+const VASSAL_CHECK_INTERVAL = 30; // ticks between revolt/annexation rolls
 // Peaceful/combat claim probabilities are tuned for single grid cells; a
 // state bundles many cells together, so raw probabilities are scaled down
 // by this factor to keep the overall pace of territorial change (cells
@@ -54,6 +61,7 @@ class Simulation {
     this.territoryHistory = [];
     this.onLog = null;
     this.onEnd = null;
+    this.onBattleEffect = null; // (x, y, kind) in cell coords — a transient map effect for the renderer
     this._neighborMap = new Map();
     this._navalContacts = new Map(); // "a-b" -> {a,b}
     this._landTotal = null;
@@ -266,6 +274,8 @@ class Simulation {
     this.processPeace(aliveNations);
     this.processEvents(aliveNations);
     this.processUnrest(aliveNations);
+    this.processTerritorialIntegrity(aliveNations);
+    this.processVassalage(aliveNations);
     this.recomputeStats();
     this.recordHistory();
     if (this.turn % 150 === 0) this.logChronicle();
@@ -429,11 +439,14 @@ class Simulation {
 
   // BFS across contiguous ocean from a coastal cell; returns land-cell indices
   // reachable within `range` sea hops (the first landfall in each direction,
-  // i.e. a beachhead) regardless of who owns them. Only cells on a *different*
-  // landmass than the origin are returned: a naval crossing represents
-  // reaching a real overseas island/continent, not hopping a few cells across
-  // a bay to an unclaimed pocket on the nation's own mainland (which used to
-  // spawn odd, unearned exclaves with no land route back to the capital).
+  // i.e. a beachhead) regardless of who owns them. A landfall on a genuinely
+  // different landmass (a real island/overseas continent) always counts; one
+  // on the *same* landmass only counts once it's at least MIN_SEA_HOPS hops
+  // out to sea, so this still represents a real voyage (around a headland,
+  // along a coast) rather than a one-cell hop over a spit of land right next
+  // to the border. Most procedurally generated maps are a single landmass —
+  // requiring a different landmass outright (an earlier version of this
+  // check) made naval expansion nearly impossible there.
   navalTargetsFrom(originIdx, range) {
     const map = this.map;
     const homeLandmass = map.getLandmassId(originIdx);
@@ -450,7 +463,7 @@ class Simulation {
           visited.add(ni);
           if (map.biome[ni] === BIOME.OCEAN) {
             next.push(ni);
-          } else if (map.getLandmassId(ni) !== homeLandmass) {
+          } else if (map.getLandmassId(ni) !== homeLandmass || step + 1 >= NAVAL_MIN_SAME_LANDMASS_HOPS) {
             landTargets.add(ni);
           }
         }
@@ -501,15 +514,20 @@ class Simulation {
             const other = this.nationsById[owner];
             if (!other || !other.alive) continue;
             this.registerNavalContact(nation.id, owner);
-            if (invaded >= MAX_INVADE || !nation.isAtWarWith(owner) || !this.rng.chance(0.1)) continue;
+            if (invaded >= MAX_INVADE || !nation.isAtWarWith(owner) || !this.rng.chance(0.08)) continue;
+            const landingFortBonus = clamp(this.avgStateAge([targetStateId]) / 500, 0, 0.4);
             const strA = nation.strength() * (1 + this.rng.float(-0.2, 0.2));
-            const strB = other.strength() * (1 + this.rng.float(-0.2, 0.2));
+            const strB = other.strength() * (1 + this.rng.float(-0.2, 0.2)) * (1 + landingFortBonus);
             if (strA > strB) {
               this.claimState(targetStateId, nation, true);
               nation.military = Math.max(0, nation.military - nation.military * 0.08);
               other.military = Math.max(0, other.military - other.military * 0.05);
               invaded++;
               invadedTargets.set(other.id, (invadedTargets.get(other.id) || 0) + 1);
+              if (this.onBattleEffect) {
+                const st = map.states[targetStateId];
+                this.onBattleEffect(st.cx, st.cy, 'naval');
+              }
               if (other.territorySize === 0 && other.alive) {
                 other.alive = false;
                 other.diedAtTick = this.turn;
@@ -542,6 +560,71 @@ class Simulation {
     defender.recordEvent(this.turn, `${attacker.name}より宣戦布告を受けた（${reason}）`);
   }
 
+  // A heavily outmatched loser submits rather than being wiped out: it keeps
+  // its remaining territory and identity, but answers to an overlord now —
+  // no independent wars or alliances, and the two of them are always at peace.
+  makeVassal(vassal, overlord, reasonText) {
+    vassal.vassalOf = overlord.id;
+    overlord.vassals.add(vassal.id);
+    vassal.vassalSinceTick = this.turn;
+    vassal.relations.delete(overlord.id);
+    overlord.relations.delete(vassal.id);
+    vassal.warSinceTick.delete(overlord.id);
+    overlord.warSinceTick.delete(vassal.id);
+    vassal.adjustRelation(overlord.id, 20);
+    overlord.adjustRelation(vassal.id, 20);
+    this.log(`${vassal.name}が${reasonText}により${overlord.name}の属国となった。`, 'vassal');
+    vassal.recordEvent(this.turn, `${overlord.name}の属国となった`);
+    overlord.recordEvent(this.turn, `${vassal.name}を属国とした`);
+  }
+
+  breakVassalage(vassal, overlord, mode) {
+    overlord.vassals.delete(vassal.id);
+    vassal.vassalOf = null;
+    vassal.adjustRelation(overlord.id, -40);
+    overlord.adjustRelation(vassal.id, -40);
+    this.log(`${vassal.name}が${overlord.name}からの独立を宣言した！`, 'split');
+    vassal.recordEvent(this.turn, `${overlord.name}から独立`);
+    overlord.recordEvent(this.turn, `${vassal.name}が離反`);
+    if (mode === 'revolt' && this.rng.chance(0.5)) {
+      this.declareWar(overlord, vassal, '離反した属国への制裁');
+    }
+  }
+
+  annexVassal(overlord, vassal) {
+    overlord.vassals.delete(vassal.id);
+    for (const stateId of [...vassal.ownedStates]) this.claimState(stateId, overlord, false);
+    vassal.alive = false;
+    vassal.diedAtTick = this.turn;
+    vassal.vassalOf = null;
+    this.log(`${overlord.name}が属国${vassal.name}を平和裏に併合した。`, 'annex');
+    overlord.recordEvent(this.turn, `${vassal.name}を併合`);
+  }
+
+  // Periodically re-evaluates every vassal relationship: a vassal that has
+  // grown close to its overlord's own strength eventually revolts (the
+  // longer the bond has quietly held, the more likely it stays that way for
+  // now); a long, stable vassalage may instead end peacefully in annexation.
+  processVassalage(aliveNations) {
+    if (this.turn % VASSAL_CHECK_INTERVAL !== 0) return;
+    for (const nation of aliveNations) {
+      if (!nation.vassalOf) continue;
+      const overlord = this.nationsById[nation.vassalOf];
+      if (!overlord || !overlord.alive) { nation.vassalOf = null; continue; }
+      const vassalAge = this.turn - (nation.vassalSinceTick || this.turn);
+      const strengthRatio = nation.strength() / Math.max(1, overlord.strength());
+      let revoltChance = 0.01 + clamp(strengthRatio - 0.6, 0, 1) * 0.05;
+      if (vassalAge < 100) revoltChance *= 0.2; // freshly cowed, unlikely to try so soon
+      if (this.rng.chance(revoltChance)) {
+        this.breakVassalage(nation, overlord, 'revolt');
+        continue;
+      }
+      if (vassalAge > 200 && this.rng.chance(0.01 + vassalAge / 20000)) {
+        this.annexVassal(overlord, nation);
+      }
+    }
+  }
+
   // Nations only go to war after an explicit declaration. Bordering (land or
   // naval-reachable) pairs at peace occasionally decide to declare war based
   // on personality and relative strength; allied pairs may instead betray.
@@ -557,6 +640,11 @@ class Simulation {
       const nationA = this.nationsById[+aStr], nationB = this.nationsById[+bStr];
       if (!nationA || !nationB || !nationA.alive || !nationB.alive) continue;
       if (nationA.isAtWarWith(nationB.id)) continue;
+      // An overlord and its own vassal never fight each other, and a vassal
+      // doesn't pursue independent wars or alliances at all — it acts
+      // through its overlord, not on its own initiative.
+      if (nationA.vassalOf === nationB.id || nationB.vassalOf === nationA.id) continue;
+      if (nationA.vassalOf || nationB.vassalOf) continue;
 
       if (nationA.allies.has(nationB.id)) {
         const betrayChance = 0.006 * Math.max(nationA.mods.betrayalMul, nationB.mods.betrayalMul);
@@ -619,10 +707,25 @@ class Simulation {
     }
   }
 
+  // Average how long a set of states has been held — a rough stand-in for
+  // fortification/entrenchment: long-held ground is harder to take than a
+  // freshly annexed frontier.
+  avgStateAge(stateIds) {
+    if (!stateIds || stateIds.length === 0) return 0;
+    let sum = 0;
+    for (const sid of stateIds) sum += this.turn - this.map.stateOwnerSinceTick[sid];
+    return sum / stateIds.length;
+  }
+
   resolveLandBattle({ a, b, statesOfAAdjB, statesOfBAdjA }) {
     const nationA = this.nationsById[a], nationB = this.nationsById[b];
-    const strA = nationA.strength() * (1 + this.rng.float(-0.15, 0.15));
-    const strB = nationB.strength() * (1 + this.rng.float(-0.15, 0.15));
+    // Each side defends better the longer it has actually held its own
+    // contested frontier — an entrenched, well-settled border stands firmer
+    // than one that was itself only just conquered.
+    const fortBonusA = clamp(this.avgStateAge([...statesOfAAdjB]) / 600, 0, 0.4);
+    const fortBonusB = clamp(this.avgStateAge([...statesOfBAdjA]) / 600, 0, 0.4);
+    const strA = nationA.strength() * (1 + this.rng.float(-0.15, 0.15)) * (1 + fortBonusA);
+    const strB = nationB.strength() * (1 + this.rng.float(-0.15, 0.15)) * (1 + fortBonusB);
     const total = strA + strB;
     if (total <= 0.001) return;
     const winner = strA > strB ? nationA : nationB;
@@ -646,6 +749,10 @@ class Simulation {
 
     if (captured.length > 0) {
       this.log(`${winner.name}が${loser.name}と交戦し、${captured.length}地域を奪取した。`, 'battle');
+      if (this.onBattleEffect) {
+        const st = this.map.states[captured[0]];
+        this.onBattleEffect(st.cx, st.cy, 'battle');
+      }
     }
 
     if (loser.territorySize === 0 && loser.alive) {
@@ -654,6 +761,13 @@ class Simulation {
       winner.relations.delete(loser.id);
       this.log(`${winner.name}が${loser.name}を滅ぼした！`, 'death');
       winner.recordEvent(this.turn, `${loser.name}を滅ぼし版図に加えた`);
+    } else if (loser.alive && !loser.vassalOf && loser.ownedStates.size <= VASSAL_CAPITULATION_MAX_STATES) {
+      // Cornered but not yet wiped out: a heavily outmatched loser may
+      // capitulate and submit as a vassal instead of fighting to the end.
+      const ratio = winner.strength() / Math.max(1, loser.strength());
+      if (ratio > 2.2 && this.rng.chance(0.1)) {
+        this.makeVassal(loser, winner, '敗戦による屈服');
+      }
     }
   }
 
@@ -834,11 +948,11 @@ class Simulation {
         nation.recordEvent(this.turn, '交易ブーム');
       }
 
-      if (this.rng.chance(0.003 * mods.allianceMul)) {
+      if (!nation.vassalOf && this.rng.chance(0.003 * mods.allianceMul)) {
         const neighborIds = [...(this._neighborMap.get(nation.id) || [])];
         const candidates = neighborIds.filter(id =>
           !nation.allies.has(id) && !nation.isAtWarWith(id) && nation.getRelation(id) > -10 &&
-          this.nationsById[id] && this.nationsById[id].alive);
+          this.nationsById[id] && this.nationsById[id].alive && !this.nationsById[id].vassalOf);
         if (candidates.length) {
           const otherId = this.rng.choice(candidates);
           const other = this.nationsById[otherId];
@@ -875,9 +989,23 @@ class Simulation {
     const map = this.map;
     const mapScale = Math.max(map.width, map.height) * 0.5;
     const capitalStateId = (nation) => map.stateId[nation.capitalIdx];
+    const OVEREXTENSION_SOFT_CAP = 40; // states; beyond this, distance rule alone stops being enough to hold order
     for (const nation of aliveNations) {
       if (nation.territorySize === 0) continue;
-      const baseGrowth = 0.14 * nation.mods.unrestMul;
+      // A war that drags on bleeds domestic order, and stacks with every
+      // simultaneous war; a nation holding far more provinces than it can
+      // administer simmers faster everywhere, not just on the frontier.
+      let warStrainMul = 1;
+      for (const [otherId, warState] of nation.relations) {
+        if (warState !== 'war') continue;
+        const duration = this.turn - (nation.warSinceTick.get(otherId) || this.turn);
+        warStrainMul += clamp(duration / 400, 0, 0.6);
+      }
+      warStrainMul = clamp(warStrainMul, 1, 2.2);
+      const overextensionMul = nation.ownedStates.size > OVEREXTENSION_SOFT_CAP
+        ? clamp(1 + (nation.ownedStates.size - OVEREXTENSION_SOFT_CAP) * 0.012, 1, 1.8)
+        : 1;
+      const baseGrowth = 0.14 * nation.mods.unrestMul * warStrainMul * overextensionMul;
       const capX = nation.capitalIdx % map.width, capY = Math.floor(nation.capitalIdx / map.width);
       const capStateId = capitalStateId(nation);
       const toRebel = [];
@@ -923,6 +1051,171 @@ class Simulation {
         nation.diedAtTick = this.turn;
         this.log(`${nation.name}が内部崩壊により消滅した。`, 'death');
       }
+    }
+  }
+
+  // Groups a set of state ids into connected components using the state
+  // adjacency graph restricted to that set — e.g. "all of this nation's
+  // states" splits into its contiguous heartland plus any cut-off pieces.
+  connectedStateComponents(stateIds) {
+    const set = stateIds instanceof Set ? stateIds : new Set(stateIds);
+    const visited = new Set();
+    const components = [];
+    for (const start of set) {
+      if (visited.has(start)) continue;
+      const comp = [];
+      const queue = [start];
+      visited.add(start);
+      while (queue.length) {
+        const cur = queue.pop();
+        comp.push(cur);
+        for (const nsid of this.map.stateNeighbors[cur]) {
+          if (set.has(nsid) && !visited.has(nsid)) { visited.add(nsid); queue.push(nsid); }
+        }
+      }
+      components.push(comp);
+    }
+    return components;
+  }
+
+  // Conquest and rebellion can slice a nation's territory into pieces that
+  // no longer touch its capital. A genuine overseas colony (a different
+  // landmass) is left alone — that's meant to be non-contiguous. A small
+  // scrap of homeland cut off from the capital, though, has no realistic way
+  // to stay governed and falls out of control; a large cut-off chunk is
+  // developed enough to organize itself as a breakaway nation instead of
+  // quietly reverting to wilderness.
+  processTerritorialIntegrity(aliveNations) {
+    if (this.turn % TERRITORIAL_CHECK_INTERVAL !== 0) return;
+    const map = this.map;
+    for (const nation of aliveNations) {
+      if (nation.territorySize === 0 || nation.ownedStates.size < 2) continue;
+      const capStateId = map.stateId[nation.capitalIdx];
+      const homeLandmass = map.getLandmassId(nation.capitalIdx);
+      const components = this.connectedStateComponents(nation.ownedStates);
+      if (components.length > 1) {
+        const coreComp = components.find(c => c.includes(capStateId))
+          || components.reduce((a, b) => (a.length >= b.length ? a : b));
+        for (const comp of components) {
+          if (comp === coreComp) continue;
+          if (map.getLandmassId(comp[0]) !== homeLandmass) continue; // a deliberate overseas holding
+          const offCooldown = this.turn - (nation.lastSplitTick || -Infinity) >= CIVIL_WAR_COOLDOWN;
+          if (comp.length >= CIVIL_WAR_MIN_SIZE && offCooldown) {
+            this.triggerCivilWar(nation, comp, 'cutoff');
+          } else if (comp.length <= EXCLAVE_REVERT_MAX) {
+            this.revertStatesToWild(nation, comp, '本国との連絡を断たれて統治が及ばなくなった');
+          }
+          if (!nation.alive) break;
+        }
+      }
+      if (!nation.alive || nation.territorySize === 0) continue;
+
+      // Separately, even a fully contiguous nation can erupt from within: a
+      // large connected block of deeply unstable provinces breaks away. A
+      // per-nation cooldown and a roll (rather than an automatic trigger the
+      // instant the cluster is big enough) keep this a rare, dramatic event
+      // instead of a constant background churn of new micro-nations.
+      if (this.turn - (nation.lastSplitTick || -Infinity) >= CIVIL_WAR_COOLDOWN) {
+        const capStateIdNow = map.stateId[nation.capitalIdx];
+        const highUnrest = [...nation.ownedStates].filter(sid => sid !== capStateIdNow && map.stateUnrest[sid] > 82);
+        if (highUnrest.length >= CIVIL_WAR_MIN_SIZE) {
+          const clusters = this.connectedStateComponents(new Set(highUnrest));
+          const biggest = clusters.reduce((a, b) => (a.length >= b.length ? a : b), []);
+          if (biggest.length >= CIVIL_WAR_MIN_SIZE && this.rng.chance(0.3)) this.triggerCivilWar(nation, biggest, 'uprising');
+        }
+      }
+    }
+  }
+
+  revertStatesToWild(nation, stateIds, reasonText) {
+    const map = this.map;
+    for (const stateId of stateIds) {
+      nation.ownedStates.delete(stateId);
+      map.stateOwner[stateId] = -1;
+      map.stateUnrest[stateId] = 0;
+      for (const idx of map.states[stateId].cells) {
+        nation.territory.delete(idx);
+        map.owner[idx] = -1;
+        map.unrest[idx] = 0;
+      }
+    }
+    this.log(`${nation.name}の飛び地(${stateIds.length}地域)が${reasonText}。`, 'rebellion');
+    nation.recordEvent(this.turn, `飛び地${stateIds.length}地域が独立`);
+    if (nation.territorySize === 0 && nation.alive) {
+      nation.alive = false;
+      nation.diedAtTick = this.turn;
+      this.log(`${nation.name}が内部崩壊により消滅した。`, 'death');
+    }
+  }
+
+  // A related but visually distinct hue so the breakaway reads as "born
+  // from" the parent nation rather than an unrelated random color.
+  deriveBreakawayColor(nation) {
+    const m = nation.color.match(/hsl\(([\d.]+),\s*([\d.]+)%,\s*([\d.]+)%\)/);
+    if (!m) return nation.color;
+    const h = (parseFloat(m[1]) + 42) % 360;
+    return `hsl(${h.toFixed(1)}, ${m[2]}%, ${m[3]}%)`;
+  }
+
+  // Splits a cluster of a nation's states off into a brand-new nation: a
+  // civil war/secession that actually changes the map, rather than territory
+  // just quietly reverting to unclaimed wilderness.
+  triggerCivilWar(nation, clusterStateIds, mode) {
+    if (!clusterStateIds || clusterStateIds.length === 0) return;
+    const map = this.map;
+    const newId = this.nations.length;
+    let capState = map.states[clusterStateIds[0]];
+    for (const sid of clusterStateIds) {
+      if (map.states[sid].size > capState.size) capState = map.states[sid];
+    }
+    const capitalIdx = capState.cells[Math.floor(capState.cells.length / 2)];
+    const personality = this.rng.choice(Object.values(PERSONALITY));
+    const politicalSystem = this.rng.choice(Object.values(POLITICAL_SYSTEM));
+    const trait = pickTrait(this.rng);
+    const name = generateNationName(this.rng);
+    const leaderName = generateLeaderName(this.rng, personality);
+    const breakaway = new Nation(newId, name, this.deriveBreakawayColor(nation), personality, capitalIdx, leaderName, politicalSystem, nation.lifestyle, trait);
+    breakaway.foundedAtTick = this.turn;
+    const shareOfParent = clusterStateIds.length / Math.max(1, nation.ownedStates.size + clusterStateIds.length);
+    breakaway.population = Math.max(10, nation.population * shareOfParent * 0.8);
+    breakaway.military = Math.max(5, nation.military * 0.25);
+    breakaway.economy = Math.max(5, nation.economy * 0.2);
+    this.nations.push(breakaway);
+    this.nationsById[newId] = breakaway;
+
+    for (const stateId of clusterStateIds) {
+      nation.ownedStates.delete(stateId);
+      breakaway.ownedStates.add(stateId);
+      map.stateOwner[stateId] = newId;
+      map.stateUnrest[stateId] = 30;
+      map.stateOwnerSinceTick[stateId] = this.turn;
+      for (const idx of map.states[stateId].cells) {
+        nation.territory.delete(idx);
+        breakaway.territory.add(idx);
+        map.owner[idx] = newId;
+        map.ownerSinceTick[idx] = this.turn;
+        map.unrest[idx] = 30;
+      }
+    }
+
+    nation.lastSplitTick = this.turn;
+    nation.adjustRelation(newId, -60);
+    breakaway.adjustRelation(nation.id, -60);
+    const flavor = mode === 'uprising' ? '各地で蜂起した民衆が' : '本国から切り離された地方が';
+    this.log(`${nation.name}領内で${flavor}独立を宣言し、新たな国家「${name}」が成立した！`, 'split');
+    nation.recordEvent(this.turn, `${name}が分離独立（${clusterStateIds.length}地域）`);
+    breakaway.recordEvent(this.turn, `${nation.name}より独立`);
+
+    // A violent uprising is much more likely to draw an immediate war of
+    // suppression than a quietly cut-off province declaring itself free.
+    if (this.rng.chance(mode === 'uprising' ? 0.6 : 0.25)) {
+      this.declareWar(nation, breakaway, '独立を認めぬ本国による鎮圧');
+    }
+
+    if (nation.territorySize === 0 && nation.alive) {
+      nation.alive = false;
+      nation.diedAtTick = this.turn;
+      this.log(`${nation.name}が内部崩壊により消滅した。`, 'death');
     }
   }
 
